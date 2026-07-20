@@ -21,10 +21,18 @@ configured until the crate exists.
 
 ## Later releases
 
-After the first release, configure crates.io trusted publishing for the exact
-repository and release environment. Add a release workflow that uses GitHub OIDC,
-has no long-lived crates.io secret, requires an immutable tag, and preserves a
-manual environment approval. Pin every action to a full commit SHA.
+Trusted publishing is bound to `TAKAMAgents/edge-completions`, `publish.yml`,
+and the GitHub `release` environment. The workflow obtains a short-lived token
+with OIDC; the repository stores no crates.io secret.
+
+1. Merge a reviewed version and changelog update after CI passes.
+2. Create an annotated `vMAJOR.MINOR.PATCH` tag on that exact `main` commit.
+3. Push the tag and approve the protected `release` environment deployment.
+4. The workflow verifies that the tag matches `Cargo.toml`, belongs to `main`,
+   and has a clean checkout before publishing with the temporary token.
+5. Verify crates.io, docs.rs, checksum, and a clean consumer installation.
+
+Every third-party action is pinned to a full commit SHA.
 
 ## Rollback
 
