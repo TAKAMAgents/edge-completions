@@ -1,0 +1,35 @@
+name: Bug report
+description: Report reproducible incorrect behavior without sensitive provider data.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, account IDs, or raw request and response bodies.
+  - type: input
+    id: version
+    attributes:
+      label: Crate version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: Include the typed error and a minimal sanitized reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: rust
+    attributes:
+      label: Rust version and platform
+      placeholder: rustc 1.85.0, x86_64-unknown-linux-gnu
+    validations:
+      required: true
