@@ -80,21 +80,13 @@ jobs:
   security:
     name: Dependency policy
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     steps:
       - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - name: Install stable Rust
-        run: rustup toolchain install stable --profile minimal
-
-      - name: Install pinned policy tools
-        run: |
-          cargo +stable install --locked cargo-audit --version 0.22.1
-          cargo +stable install --locked cargo-deny --version 0.19.4
-
-      - name: Check advisories
-        run: cargo +stable audit
-
-      - name: Check licenses, sources, and bans
-        run: cargo +stable deny check
+      - name: Check advisories, licenses, sources, and bans
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
