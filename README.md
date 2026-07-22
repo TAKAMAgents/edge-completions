@@ -3,10 +3,11 @@
 [![CI](https://github.com/TAKAMAgents/edge-completions/actions/workflows/ci.yml/badge.svg)](https://github.com/TAKAMAgents/edge-completions/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/edge-completions.svg)](https://crates.io/crates/edge-completions)
 [![docs.rs](https://docs.rs/edge-completions/badge.svg)](https://docs.rs/edge-completions)
-[![license](https://img.shields.io/crates/l/edge-completions.svg)](LICENSE-MIT)
+[![license](https://img.shields.io/crates/l/edge-completions.svg)](https://github.com/TAKAMAgents/edge-completions/blob/main/LICENSE-MIT)
 
-An ergonomic, typed Rust client for OpenAI-compatible chat completions through
-Cloudflare. The first supported convenience model is `moonshotai/kimi-k3`.
+An ergonomic, typed Rust SDK and optional command-line client for
+OpenAI-compatible chat completions through Cloudflare. The first supported
+convenience model is `moonshotai/kimi-k3`.
 
 This is an independent open-source project. It is not affiliated with,
 endorsed by, or sponsored by Cloudflare, Inc. Cloudflare is a trademark of
@@ -19,25 +20,35 @@ Cloudflare, Inc.
 - Typed tool schemas, arguments, and results without public raw-JSON escape hatches.
 - `thiserror` errors for configuration, transport, provider, response, and tool failures.
 - Redacted token debug output and bounded response-body decoding.
+- An opt-in `edge-completions` command that prints typed assistant text, never raw envelopes.
 - No autonomous tool loop: your application retains authorization and execution control.
 
 ## Install
 
-After the first crates.io release:
+Add the library:
 
 ```bash
 cargo add edge-completions
 ```
 
-The examples also need Tokio, Schemars, and Serde:
+Install the optional command-line client:
+
+```bash
+cargo install edge-completions --features cli
+```
+
+The `cli` feature is intentionally disabled for library consumers, so SDK-only
+builds do not compile command-line dependencies. The minimum supported Rust
+version is 1.86.
+
+Applications using the asynchronous examples also need Tokio. Typed tool
+definitions use Schemars and Serde:
 
 ```bash
 cargo add tokio --features macros,rt-multi-thread
 cargo add schemars
 cargo add serde --features derive
 ```
-
-The minimum supported Rust version is 1.86.
 
 ## Configuration
 
@@ -56,6 +67,36 @@ You can find the account ID in the Cloudflare dashboard after selecting your
 account, or follow Cloudflare's
 [account and zone ID guide](https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/).
 Never commit either value.
+
+## Command line
+
+Validate configuration without making an API request:
+
+```bash
+source ~/.zshrc
+edge-completions check
+```
+
+Send a prompt and print only the assistant's text:
+
+```bash
+edge-completions chat \
+  --temperature 0.2 \
+  --max-tokens 200 \
+  "Explain typed API boundaries in one sentence."
+```
+
+Prompts can also come from standard input:
+
+```bash
+printf '%s\n' 'Explain capability traits concisely.' | edge-completions chat
+```
+
+Use `edge-completions help chat` for all chat options. The command returns typed,
+sanitized errors on standard error. It does not expose raw request or response
+envelopes and does not execute model-proposed tools. See the complete
+[CLI reference](https://github.com/TAKAMAgents/edge-completions/blob/main/docs/CLI.md),
+including exit codes and the base-URL security contract.
 
 ## Simple chat
 
@@ -152,6 +193,24 @@ async fn answer(
 }
 ```
 
+Keep the environment-based credential lookup while customizing the transport:
+
+```rust,no_run
+use edge_completions::{Client, GatewayId};
+
+fn client() -> Result<Client, edge_completions::Error> {
+    Client::builder_from_env()?
+        .gateway_id(GatewayId::new("production-gateway")?)
+        .build()
+}
+```
+
+## Features
+
+| Feature | Default | Purpose |
+| --- | --- | --- |
+| `cli` | No | Builds the installable `edge-completions` command. |
+
 ## Error and security model
 
 - Every library failure is typed with `thiserror`; production code contains no
@@ -193,8 +252,11 @@ do not make live provider calls.
 - Provider contract drift remains possible. Contract changes should land with a
   versioned test before expanding the public API.
 
-See [architecture](docs/ARCHITECTURE.md), [contributing](CONTRIBUTING.md),
-[security policy](SECURITY.md), and [release process](docs/RELEASING.md).
+See the [architecture](https://github.com/TAKAMAgents/edge-completions/blob/main/docs/ARCHITECTURE.md),
+[contributing guide](https://github.com/TAKAMAgents/edge-completions/blob/main/CONTRIBUTING.md),
+[CLI reference](https://github.com/TAKAMAgents/edge-completions/blob/main/docs/CLI.md),
+[security policy](https://github.com/TAKAMAgents/edge-completions/blob/main/SECURITY.md),
+and [release process](https://github.com/TAKAMAgents/edge-completions/blob/main/docs/RELEASING.md).
 
 ## License
 
