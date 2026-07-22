@@ -268,7 +268,35 @@ impl Client {
     /// Creates a client from `CLOUDFLARE_ACCOUNT_ID` and
     /// `CLOUDFLARE_API_TOKEN`.
     pub fn from_env() -> Result<Self, Error> {
-        Self::from_env_with(|name| std::env::var(name))
+        Self::builder_from_env()?.build()
+    }
+
+    /// Starts a client builder from environment-provided credentials.
+    ///
+    /// This is the environment-based counterpart to [`Client::builder`]. It
+    /// lets applications retain the standard credential lookup while
+    /// configuring transport policy or AI Gateway routing before building the
+    /// client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] when a required credential is
+    /// missing or violates its typed invariant.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use edge_completions::{Client, GatewayId};
+    ///
+    /// # fn configured_client() -> Result<Client, edge_completions::Error> {
+    /// let client = Client::builder_from_env()?
+    ///     .gateway_id(GatewayId::new("production-gateway")?)
+    ///     .build()?;
+    /// # Ok(client)
+    /// # }
+    /// ```
+    pub fn builder_from_env() -> Result<ClientBuilder, Error> {
+        Self::builder_from_env_with(|name| std::env::var(name))
     }
 
     /// Creates a client from validated credentials using default transport settings.
@@ -311,9 +339,9 @@ impl Client {
         serde_json::from_slice(&body).map_err(|source| Error::InvalidResponse { source })
     }
 
-    fn from_env_with(
+    fn builder_from_env_with(
         read: impl Fn(&str) -> Result<String, std::env::VarError>,
-    ) -> Result<Self, Error> {
+    ) -> Result<ClientBuilder, Error> {
         let account_id =
             read(ACCOUNT_ID_ENV).map_err(|_| InvalidConfiguration::MissingEnvironmentVariable {
                 name: ACCOUNT_ID_ENV,
@@ -326,7 +354,10 @@ impl Client {
                 }
             })?,
         };
-        Self::new(AccountId::new(account_id)?, ApiToken::new(api_token)?)
+        Ok(Self::builder(
+            AccountId::new(account_id)?,
+            ApiToken::new(api_token)?,
+        ))
     }
 }
 
@@ -547,12 +578,13 @@ mod tests {
             (ACCOUNT_ID_ENV, "account-1"),
             (API_TOKEN_ENV, "super-secret"),
         ]);
-        let client = Client::from_env_with(|name| {
+        let client = Client::builder_from_env_with(|name| {
             values
                 .get(name)
                 .map(ToString::to_string)
                 .ok_or(VarError::NotPresent)
-        })?;
+        })?
+        .build()?;
 
         assert!(!format!("{client:?}").contains("super-secret"));
         assert_eq!(
@@ -564,7 +596,7 @@ mod tests {
 
     #[test]
     fn reports_the_missing_environment_variable_by_name() -> TestResult {
-        let error = match Client::from_env_with(|_| Err(VarError::NotPresent)) {
+        let error = match Client::builder_from_env_with(|_| Err(VarError::NotPresent)) {
             Err(error) => error,
             Ok(_) => return Err("client creation unexpectedly succeeded".into()),
         };
@@ -578,7 +610,7 @@ mod tests {
 
     #[test]
     fn reports_a_missing_api_token_without_reading_or_displaying_it() -> TestResult {
-        let result = Client::from_env_with(|name| match name {
+        let result = Client::builder_from_env_with(|name| match name {
             ACCOUNT_ID_ENV => Ok("account-1".to_owned()),
             _ => Err(VarError::NotPresent),
         });
@@ -600,12 +632,13 @@ mod tests {
             (ACCOUNT_ID_ENV, "account-1"),
             (LEGACY_KIMI_API_TOKEN_ENV, "legacy-secret"),
         ]);
-        let client = Client::from_env_with(|name| {
+        let client = Client::builder_from_env_with(|name| {
             values
                 .get(name)
                 .map(ToString::to_string)
                 .ok_or(VarError::NotPresent)
-        })?;
+        })?
+        .build()?;
 
         assert!(!format!("{client:?}").contains("legacy-secret"));
         Ok(())
