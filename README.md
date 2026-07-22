@@ -16,12 +16,18 @@ Cloudflare, Inc.
 ## Why this crate
 
 - A small, object-safe `ChatCompletions` trait for application boundaries.
+- A sealed typestate request builder that rejects illegal construction
+  sequences at compile time.
 - Validated newtypes for account IDs, API tokens, models, URLs, timeouts, and limits.
-- Typed tool schemas, arguments, and results without public raw-JSON escape hatches.
-- `thiserror` errors for configuration, transport, provider, response, and tool failures.
+- Typed tool schemas, arguments, and results without a public untyped JSON
+  escape hatch.
+- `thiserror` errors for configuration, transport, provider, response, and tool
+  failures.
 - Redacted token debug output and bounded response-body decoding.
-- An opt-in `edge-completions` command that prints typed assistant text, never raw envelopes.
-- No autonomous tool loop: your application retains authorization and execution control.
+- An opt-in `edge-completions` command that prints typed assistant text and
+  never prints provider envelopes.
+- No autonomous tool loop: your application retains authorization and
+  execution control.
 
 ## Install
 
@@ -77,6 +83,12 @@ source ~/.zshrc
 edge-completions check
 ```
 
+Expected output:
+
+```text
+configuration is valid
+```
+
 Send a prompt and print only the assistant's text:
 
 ```bash
@@ -98,23 +110,27 @@ envelopes and does not execute model-proposed tools. See the complete
 [CLI reference](https://github.com/TAKAMAgents/edge-completions/blob/main/docs/CLI.md),
 including exit codes and the base-URL security contract.
 
-## Simple chat
+## Library quickstart
 
 ```rust,no_run
-use edge_completions::{ChatMessage, ChatRequest, Client, Error};
+use edge_completions::{AssistantOutput, ChatMessage, ChatRequest, Client, Error};
 
 async fn answer() -> Result<(), Error> {
     let client = Client::from_env()?;
-    let request = ChatRequest::kimi_k3(vec![ChatMessage::user(
-        "Explain typed API boundaries in one sentence.",
-    )])?;
+    let request = ChatRequest::kimi_k3_builder()
+        .message(ChatMessage::user(
+            "Explain typed API boundaries in one sentence.",
+        ))
+        .build();
 
     let completion = client.chat(&request).await?;
-    let text = completion
-        .first_choice()?
-        .message()
-        .content()
-        .ok_or(Error::MissingContent)?;
+    let text = match completion.first_choice()?.message().output() {
+        AssistantOutput::Text(text) => text,
+        AssistantOutput::TextAndToolCalls { text, .. } => text,
+        AssistantOutput::ToolCalls(_) | AssistantOutput::Empty => {
+            return Err(Error::MissingContent);
+        }
+    };
 
     println!("{text}");
     Ok(())
@@ -127,6 +143,9 @@ Run the complete example:
 source ~/.zshrc
 cargo run --example simple_chat
 ```
+
+Expected result: the example prints the model identifier followed by validated
+assistant text. It never prints the provider response envelope.
 
 ## Typed tool calls
 
@@ -163,11 +182,11 @@ Decode a provider proposal only through the matching contract:
 
 ```rust,ignore
 let call = completion.first_choice()?.message().first_tool_call()?;
-let arguments = call.arguments_for::<GetWeather>()?;
+let validated_call = call.validate::<GetWeather>()?;
 
 // The application authorizes and executes the action here.
-let report = get_weather(arguments);
-let result_message = ChatMessage::tool_result::<GetWeather>(call, &report)?;
+let report = get_weather(validated_call.arguments());
+let result_message = validated_call.result(&report)?;
 ```
 
 Run the complete two-turn example:
@@ -179,6 +198,81 @@ cargo run --example weather_tool
 
 The example returns deterministic sample weather; it does not call a weather
 service or claim to provide a live forecast.
+
+Output follows this shape. The final sentence depends on the model:
+
+```text
+Tool requested: get_weather
+Validated city: San Francisco
+Final answer: ...
+```
+
+## Compile-time composition
+
+The typestate builder represents valid request states as types. Adding a
+message or tool consumes one state and returns the next, while trait bounds
+control which operations exist:
+
+```rust
+# use edge_completions::{ChatMessage, ChatRequest, FunctionTool, ToolChoice, ToolDefinition};
+# use schemars::JsonSchema;
+# use serde::{Deserialize, Serialize};
+# struct GetWeather;
+# #[derive(Deserialize, JsonSchema)] struct WeatherArguments { city: String }
+# #[derive(Serialize)] struct WeatherReport { temperature_celsius: i16 }
+# impl ToolDefinition for GetWeather {
+#     type Arguments = WeatherArguments;
+#     type Output = WeatherReport;
+#     const NAME: &'static str = "get_weather";
+#     const DESCRIPTION: &'static str = "Get the weather for a city";
+# }
+# fn request() -> Result<edge_completions::ChatRequest, edge_completions::ToolError> {
+let request = ChatRequest::kimi_k3_builder()
+    .message(ChatMessage::user("Weather in Paris?"))
+    .tool(FunctionTool::for_tool::<GetWeather>()?)
+    .tool_choice(ToolChoice::Required)
+    .build();
+# Ok(request)
+# }
+```
+
+Calling `build` before `message`, or `tool_choice` before `tool`, does not
+compile. `AssistantOutput` models response alternatives as an exhaustive sum
+type, so callers must handle text, tool calls, text and tool calls, and empty
+output.
+
+| Guarantee | Enforced by | Failure point |
+| --- | --- | --- |
+| A request has at least one message | `ChatRequestBuilder` typestate | Compilation |
+| Tool choice follows at least one tool | `WithTools` trait bound | Compilation |
+| A tool result matches its tool contract | `ValidatedToolCall<T>` | Compilation |
+| Every supported assistant outcome is handled | Exhaustive `AssistantOutput` match | Compilation |
+| Provider data matches the declared contract | Typed deserialization and validation | Runtime |
+
+The same design has a small categorical interpretation: request states are
+objects, legal transitions are composable morphisms, and assistant output is a
+coproduct with a product branch. External network and model data still require
+typed runtime validation.
+
+See the [type-system guide](https://docs.rs/edge-completions/latest/edge_completions/type_system/)
+for the complete state graph, compile-fail examples, and the boundary between
+static guarantees and runtime checks.
+
+## Migrating from 0.2
+
+Version 0.3 is additive. Existing `ChatRequest::new`, `ChatRequest::kimi_k3`,
+`with_tool`, `with_tools`, and `ToolCall::arguments_for` calls remain available.
+New code should prefer these replacements:
+
+| 0.2 API | Preferred 0.3 API | Benefit |
+| --- | --- | --- |
+| `ChatRequest::kimi_k3(messages)` | `ChatRequest::kimi_k3_builder().message(...).build()` | Non-empty messages are proven at compile time |
+| `request.with_tools(tools, choice)` | `.tool(...).tool_choice(choice)` | Tool choice cannot precede a tool |
+| `call.arguments_for::<T>()` | `call.validate::<T>()` | The validation proof remains available for result encoding |
+| `message.content()` plus `tool_calls()` | `message.output()` | All supported output combinations are handled together |
+
+No automatic migration is required. Adopt the new API when compile-time
+guarantees are useful at the call site.
 
 ## Trait boundary
 
@@ -215,11 +309,18 @@ fn client() -> Result<Client, edge_completions::Error> {
 
 - Every library failure is typed with `thiserror`; production code contains no
   `unwrap`, `expect`, or panic path.
+- Local request cardinality and tool-choice sequencing are enforced by typestate;
+  provider responses and model-produced tool calls are checked at runtime.
+- `ValidatedToolCall<T>` is a proof-carrying value that binds decoded arguments
+  and encoded output to the same `ToolDefinition` at compile time.
 - API tokens use redacted `Debug` and are never included in errors.
-- Success and failure bodies are size-bounded. Unknown error bodies are not exposed.
+- Success and failure bodies are size-bounded. Unknown error bodies are not
+  exposed.
 - Only HTTPS endpoints are accepted, except loopback HTTP for local tests.
 - Tool names and arguments are model-controlled and remain untrusted until
-  `arguments_for::<T>()` validates the name and deserializes into `T::Arguments`.
+  `validate::<T>()` produces a `ValidatedToolCall<T>` witness. The compatibility
+  helper `arguments_for::<T>()` performs the same validation and returns the
+  arguments.
 - Tool execution is intentionally outside this crate.
 
 A `402 Payment Required` with Cloudflare code `2021` means the account or AI
@@ -230,12 +331,13 @@ balance or configure BYOK before retrying the live examples.
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+cargo test --locked --doc --all-features
+RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc --locked --no-deps --all-features
 cargo deny check
 cargo audit
-cargo publish --dry-run
+cargo publish --locked --dry-run
 ```
 
 Tests cover exact request serialization, public trait use, typed tool-call
@@ -253,6 +355,7 @@ do not make live provider calls.
   versioned test before expanding the public API.
 
 See the [architecture](https://github.com/TAKAMAgents/edge-completions/blob/main/docs/ARCHITECTURE.md),
+[type-system guide](https://docs.rs/edge-completions/latest/edge_completions/type_system/),
 [contributing guide](https://github.com/TAKAMAgents/edge-completions/blob/main/CONTRIBUTING.md),
 [CLI reference](https://github.com/TAKAMAgents/edge-completions/blob/main/docs/CLI.md),
 [security policy](https://github.com/TAKAMAgents/edge-completions/blob/main/SECURITY.md),

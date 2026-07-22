@@ -35,7 +35,19 @@ jobs:
           test -z "$(git status --porcelain)"
 
       - name: Install stable Rust
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Revalidate the release source
+        shell: bash
+        env:
+          RUSTDOCFLAGS: -D warnings -D missing_docs
+        run: |
+          cargo +stable fmt --all -- --check
+          cargo +stable clippy --locked --all-targets --all-features -- -D warnings
+          cargo +stable test --locked --all-targets --all-features
+          cargo +stable test --locked --doc --all-features
+          cargo +stable doc --locked --no-deps --all-features
+          cargo +stable package --locked
 
       - name: Obtain a short-lived crates.io token
         id: auth

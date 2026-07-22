@@ -1,7 +1,8 @@
 use std::process::ExitCode;
 
 use edge_completions::{
-    ChatMessage, ChatRequest, Client, Error, FunctionTool, ToolChoice, ToolDefinition,
+    AssistantOutput, ChatMessage, ChatRequest, Client, Error, FunctionTool, ToolChoice,
+    ToolDefinition,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -96,36 +97,44 @@ async fn run() -> Result<(), Error> {
 
     let proposal = client
         .chat(
-            &ChatRequest::kimi_k3(vec![user_message.clone()])?
-                .with_tool(tool.clone(), ToolChoice::Required),
+            &ChatRequest::kimi_k3_builder()
+                .message(user_message.clone())
+                .tool(tool.clone())
+                .tool_choice(ToolChoice::Required)
+                .build(),
         )
         .await?;
     let proposed_calls = proposal.first_choice()?.message().tool_calls().to_vec();
     let call = proposal.first_choice()?.message().first_tool_call()?;
-    let arguments = call.arguments_for::<GetWeather>()?;
+    let validated_call = call.validate::<GetWeather>()?;
 
     println!("Tool requested: {}", call.name());
-    println!("Validated city: {}", arguments.city.as_str());
+    println!(
+        "Validated city: {}",
+        validated_call.arguments().city.as_str()
+    );
 
     // Tool execution is an explicit application decision, not an SDK side effect.
-    let report = get_weather(&arguments.city);
-    let tool_result = ChatMessage::tool_result::<GetWeather>(call, &report)?;
+    let report = get_weather(&validated_call.arguments().city);
+    let tool_result = validated_call.result(&report)?;
 
     let final_completion = client
         .chat(
-            &ChatRequest::kimi_k3(vec![
-                user_message,
-                ChatMessage::assistant_tool_calls(proposed_calls),
-                tool_result,
-            ])?
-            .with_tool(tool, ToolChoice::Auto),
+            &ChatRequest::kimi_k3_builder()
+                .message(user_message)
+                .message(ChatMessage::assistant_tool_calls(proposed_calls))
+                .message(tool_result)
+                .tool(tool)
+                .tool_choice(ToolChoice::Auto)
+                .build(),
         )
         .await?;
-    let answer = final_completion
-        .first_choice()?
-        .message()
-        .content()
-        .ok_or(Error::MissingContent)?;
+    let answer = match final_completion.first_choice()?.message().output() {
+        AssistantOutput::Text(text) | AssistantOutput::TextAndToolCalls { text, .. } => text,
+        AssistantOutput::ToolCalls(_) | AssistantOutput::Empty => {
+            return Err(Error::MissingContent);
+        }
+    };
 
     println!("Final answer: {answer}");
     Ok(())

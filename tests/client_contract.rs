@@ -1,6 +1,6 @@
 use edge_completions::{
-    AccountId, ApiBaseUrl, ApiToken, ChatCompletions, ChatMessage, ChatRequest, Client,
-    FunctionTool, ToolChoice, ToolDefinition,
+    AccountId, ApiBaseUrl, ApiToken, AssistantOutput, ChatCompletions, ChatMessage, ChatRequest,
+    Client, FunctionTool, ToolChoice, ToolDefinition,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -93,10 +93,11 @@ async fn downstream_caller_can_complete_and_decode_a_typed_tool_call() -> TestRe
     let client = Client::builder(AccountId::new("account-1")?, ApiToken::new("test-token")?)
         .base_url(ApiBaseUrl::new(format!("{}/", server.uri()))?)
         .build()?;
-    let request = ChatRequest::kimi_k3(vec![ChatMessage::user("Weather in Paris?")])?.with_tool(
-        FunctionTool::for_tool::<LookupWeather>()?,
-        ToolChoice::Required,
-    );
+    let request = ChatRequest::kimi_k3_builder()
+        .message(ChatMessage::user("Weather in Paris?"))
+        .tool(FunctionTool::for_tool::<LookupWeather>()?)
+        .tool_choice(ToolChoice::Required)
+        .build();
     assert_eq!(
         serde_json::to_value(&request)?,
         json!({
@@ -121,17 +122,25 @@ async fn downstream_caller_can_complete_and_decode_a_typed_tool_call() -> TestRe
     );
 
     let completion = complete_through_trait(&client, &request).await?;
-    let call = completion.first_choice()?.message().first_tool_call()?;
-    let arguments = call.arguments_for::<LookupWeather>()?;
-    let result = ChatMessage::tool_result::<LookupWeather>(
-        call,
-        &WeatherReport {
-            temperature_celsius: 18,
-        },
-    )?;
+    let calls = match completion.first_choice()?.message().output() {
+        AssistantOutput::ToolCalls(calls)
+        | AssistantOutput::TextAndToolCalls {
+            tool_calls: calls, ..
+        } => calls,
+        AssistantOutput::Text(_) | AssistantOutput::Empty => {
+            return Err("provider did not return the required tool-call alternative".into());
+        }
+    };
+    let call = calls
+        .first()
+        .ok_or(edge_completions::Error::MissingToolCall)?;
+    let validated_call = call.validate::<LookupWeather>()?;
+    let result = validated_call.result(&WeatherReport {
+        temperature_celsius: 18,
+    })?;
 
     assert_eq!(completion.id(), "chatcmpl-contract-1");
-    assert_eq!(arguments.city, "Paris");
+    assert_eq!(validated_call.arguments().city, "Paris");
     assert_eq!(
         serde_json::to_value(result)?,
         json!({

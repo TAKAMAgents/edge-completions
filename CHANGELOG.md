@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-22
+
+### Added
+
+- A sealed, trait-bound `ChatRequestBuilder` typestate API that makes missing
+  messages and tool-choice-before-tool sequences compile-time errors.
+- An exhaustive `AssistantOutput` sum type for text, tool calls,
+  text and tool calls, and empty provider outcomes.
+- A `ValidatedToolCall<T>` proof type that binds validated model arguments and
+  application results to the same tool contract.
+
+### Changed
+
+- The CLI and bundled examples now build requests through typestate and handle
+  assistant output through an exhaustive match.
+- Public fallible APIs now document their complete error contracts. Clippy
+  treats missing `# Errors` and `# Panics` sections as release-blocking warnings.
+- Developer documentation now separates compile-time guarantees from runtime
+  validation and provides a focused type-system guide and `0.2` migration path.
+
 ## [0.2.0] - 2026-07-22
 
 ### Added
@@ -34,6 +54,7 @@ All notable changes to this project are documented here. The format follows
 - Structured `thiserror` failures that do not expose raw provider bodies or API tokens.
 - Local provider-contract tests and runnable chat and tool-use examples.
 
-[Unreleased]: https://github.com/TAKAMAgents/edge-completions/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/TAKAMAgents/edge-completions/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/TAKAMAgents/edge-completions/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TAKAMAgents/edge-completions/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/TAKAMAgents/edge-completions/releases/tag/v0.1.0

@@ -5,8 +5,8 @@ use std::{
 
 use clap::{Args, Parser, Subcommand, error::ErrorKind};
 use edge_completions::{
-    ApiBaseUrl, ChatCompletions, ChatMessage, ChatRequest, Client, Error, GatewayId,
-    InvalidConfiguration, MaxTokens, ModelId, Temperature,
+    ApiBaseUrl, AssistantOutput, ChatCompletions, ChatMessage, ChatRequest, Client, Error,
+    GatewayId, InvalidConfiguration, MaxTokens, ModelId, Temperature,
 };
 
 const MAX_PROMPT_BYTES: usize = 64 * 1024;
@@ -18,8 +18,9 @@ const USAGE_ERROR_EXIT_CODE: u8 = 2;
     version,
     about = "Typed Cloudflare chat completions from the command line",
     long_about = "Send typed, non-streaming chat-completion requests through Cloudflare.\n\
-                  Credentials are read from CLOUDFLARE_ACCOUNT_ID and \
-                  CLOUDFLARE_API_TOKEN. Provider envelopes and credentials are never printed."
+                  Credentials are read from CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN; \
+                  KIMI3_ON_CLOUDFLARE_API_KEY remains a token fallback. Provider envelopes and \
+                  credentials are never printed."
 )]
 struct CommandLine {
     /// Override the Cloudflare API base URL.
@@ -205,20 +206,20 @@ fn configured_client(
 
 impl ChatArguments {
     fn into_request(self, prompt: Prompt) -> Result<ChatRequest, CommandError> {
-        let mut messages = Vec::with_capacity(usize::from(self.system.is_some()) + 1);
-        if let Some(system) = self.system {
-            messages.push(ChatMessage::system(system));
-        }
-        messages.push(ChatMessage::user(prompt.into_inner()));
-
-        let mut request = ChatRequest::new(self.model, messages)?;
+        let user_message = ChatMessage::user(prompt.into_inner());
+        let mut builder = match self.system {
+            Some(system) => ChatRequest::builder(self.model)
+                .message(ChatMessage::system(system))
+                .message(user_message),
+            None => ChatRequest::builder(self.model).message(user_message),
+        };
         if let Some(value) = self.temperature {
-            request = request.with_temperature(Temperature::new(value)?);
+            builder = builder.temperature(Temperature::new(value)?);
         }
         if let Some(value) = self.max_tokens {
-            request = request.with_max_tokens(MaxTokens::new(value)?);
+            builder = builder.max_tokens(MaxTokens::new(value)?);
         }
-        Ok(request)
+        Ok(builder.build())
     }
 }
 
@@ -227,12 +228,12 @@ async fn complete_text(
     request: &ChatRequest,
 ) -> Result<String, CommandError> {
     let completion = completions.complete(request).await?;
-    let content = completion
-        .first_choice()?
-        .message()
-        .content()
-        .ok_or(Error::MissingContent)?;
-    Ok(content.to_owned())
+    match completion.first_choice()?.message().output() {
+        AssistantOutput::Text(text) | AssistantOutput::TextAndToolCalls { text, .. } => {
+            Ok(text.to_owned())
+        }
+        AssistantOutput::ToolCalls(_) | AssistantOutput::Empty => Err(Error::MissingContent.into()),
+    }
 }
 
 fn emit_parse_result(error: clap::Error) -> Result<ExitCode, CommandError> {

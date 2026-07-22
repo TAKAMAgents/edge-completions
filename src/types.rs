@@ -1,4 +1,4 @@
-use std::{fmt, str::FromStr};
+use std::{fmt, marker::PhantomData, str::FromStr};
 
 use schemars::{JsonSchema, Schema};
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -6,6 +6,14 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use crate::{Error, InvalidConfiguration, ToolError};
 
 /// A validated provider model identifier, such as `moonshotai/kimi-k3`.
+///
+/// ```
+/// use edge_completions::ModelId;
+///
+/// let model = ModelId::new("moonshotai/kimi-k3")?;
+/// assert_eq!(model.as_str(), "moonshotai/kimi-k3");
+/// # Ok::<(), edge_completions::InvalidConfiguration>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct ModelId(String);
@@ -18,6 +26,13 @@ impl ModelId {
     }
 
     /// Validates and constructs a model identifier.
+    ///
+    /// Leading and trailing whitespace is removed before storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::EmptyModelId`] when the trimmed value is
+    /// empty.
     pub fn new(value: impl Into<String>) -> Result<Self, InvalidConfiguration> {
         let value = value.into();
         let trimmed = value.trim();
@@ -64,6 +79,16 @@ impl FromStr for ModelId {
 }
 
 /// A typed chat message accepted by the provider request contract.
+///
+/// Use the role-specific constructors instead of constructing provider payloads
+/// directly:
+///
+/// ```
+/// use edge_completions::ChatMessage;
+///
+/// let message = ChatMessage::user("Explain trait boundaries.");
+/// assert_eq!(message, ChatMessage::user("Explain trait boundaries."));
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ChatMessage(MessagePayload);
@@ -124,6 +149,16 @@ impl ChatMessage {
     }
 
     /// Encodes a typed tool result after confirming that the call name matches `T`.
+    ///
+    /// Prefer [`ValidatedToolCall::result`] after calling
+    /// [`ToolCall::validate`]. That path carries the successful name and
+    /// argument validation in the type system.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::UnexpectedName`] when the proposed function name
+    /// does not match `T::NAME`, or [`ToolError::ResultEncoding`] when the typed
+    /// output cannot be serialized.
     pub fn tool_result<T: ToolDefinition>(
         call: &ToolCall,
         result: &T::Output,
@@ -173,6 +208,32 @@ impl FunctionDefinition {
 }
 
 /// A typed tool contract used for schema generation, argument decoding, and result encoding.
+///
+/// The associated types ensure that one tool name, one validated argument type,
+/// and one result type travel together through the SDK.
+///
+/// ```
+/// use edge_completions::ToolDefinition;
+/// use schemars::JsonSchema;
+/// use serde::{Deserialize, Serialize};
+///
+/// struct LookupWeather;
+///
+/// #[derive(Deserialize, JsonSchema)]
+/// struct Arguments { city: String }
+///
+/// #[derive(Serialize)]
+/// struct Report { temperature_celsius: i16 }
+///
+/// impl ToolDefinition for LookupWeather {
+///     type Arguments = Arguments;
+///     type Output = Report;
+///     const NAME: &'static str = "lookup_weather";
+///     const DESCRIPTION: &'static str = "Look up the weather for a city";
+/// }
+///
+/// assert_eq!(LookupWeather::NAME, "lookup_weather");
+/// ```
 pub trait ToolDefinition {
     /// Validated application type decoded from model-produced JSON arguments.
     type Arguments: serde::de::DeserializeOwned + JsonSchema;
@@ -188,6 +249,24 @@ pub trait ToolDefinition {
 }
 
 /// A validated OpenAI-compatible function-tool definition.
+///
+/// ```
+/// # use edge_completions::{FunctionTool, ToolDefinition};
+/// # use schemars::JsonSchema;
+/// # use serde::{Deserialize, Serialize};
+/// # struct LookupWeather;
+/// # #[derive(Deserialize, JsonSchema)] struct Arguments { city: String }
+/// # #[derive(Serialize)] struct Report { temperature_celsius: i16 }
+/// # impl ToolDefinition for LookupWeather {
+/// #     type Arguments = Arguments;
+/// #     type Output = Report;
+/// #     const NAME: &'static str = "lookup_weather";
+/// #     const DESCRIPTION: &'static str = "Look up the weather for a city";
+/// # }
+/// let tool = FunctionTool::for_tool::<LookupWeather>()?;
+/// assert_eq!(tool.name(), "lookup_weather");
+/// # Ok::<(), edge_completions::ToolError>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FunctionTool {
     #[serde(rename = "type")]
@@ -197,6 +276,11 @@ pub struct FunctionTool {
 
 impl FunctionTool {
     /// Generates a function definition from the typed contract `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::InvalidDefinition`] when `T::NAME` or
+    /// `T::DESCRIPTION` is empty after trimming.
     pub fn for_tool<T: ToolDefinition>() -> Result<Self, ToolError> {
         if T::NAME.trim().is_empty() {
             return Err(ToolError::InvalidDefinition { field: "name" });
@@ -230,12 +314,25 @@ enum FunctionToolKind {
 }
 
 /// Sampling temperature constrained to the provider's documented `[0, 2]` range.
+///
+/// ```
+/// use edge_completions::Temperature;
+///
+/// let temperature = Temperature::new(0.2)?;
+/// assert_eq!(temperature.value(), 0.2);
+/// # Ok::<(), edge_completions::InvalidConfiguration>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct Temperature(f32);
 
 impl Temperature {
     /// Creates a temperature in the inclusive range from zero to two.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::InvalidTemperature`] when `value` is not
+    /// finite or falls outside the inclusive range `0.0..=2.0`.
     pub fn new(value: f32) -> Result<Self, InvalidConfiguration> {
         if value.is_finite() && (0.0..=2.0).contains(&value) {
             Ok(Self(value))
@@ -252,12 +349,24 @@ impl Temperature {
 }
 
 /// A validated, non-zero completion-token limit.
+///
+/// ```
+/// use edge_completions::MaxTokens;
+///
+/// let limit = MaxTokens::new(256)?;
+/// assert_eq!(limit.value(), 256);
+/// # Ok::<(), edge_completions::InvalidConfiguration>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct MaxTokens(u32);
 
 impl MaxTokens {
     /// Creates a non-zero completion-token limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::ZeroMaxTokens`] when `value` is zero.
     pub fn new(value: u32) -> Result<Self, InvalidConfiguration> {
         if value == 0 {
             Err(InvalidConfiguration::ZeroMaxTokens)
@@ -273,7 +382,7 @@ impl MaxTokens {
     }
 }
 
-/// Provider policy for selecting function tools.
+/// Provider setting for selecting function tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -286,7 +395,185 @@ pub enum ToolChoice {
     Required,
 }
 
+/// Compile-time states used by [`ChatRequestBuilder`].
+///
+/// The traits are sealed: callers can name the states in generic APIs, but
+/// only this crate can define new legal request states.
+pub mod request_state {
+    mod sealed {
+        pub trait Sealed {}
+    }
+
+    /// A sealed witness for the message-cardinality state of a request builder.
+    pub trait MessageState: sealed::Sealed {}
+
+    /// A sealed witness for the tool-cardinality state of a request builder.
+    pub trait ToolState: sealed::Sealed {}
+
+    /// Witness that a request builder does not yet contain a message.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct NeedsMessage;
+
+    /// Witness that a request builder contains at least one message.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct HasMessages;
+
+    /// Witness that a request builder does not contain a tool definition.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct WithoutTools;
+
+    /// Witness that a request builder contains at least one tool definition.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct WithTools;
+
+    impl sealed::Sealed for NeedsMessage {}
+    impl sealed::Sealed for HasMessages {}
+    impl sealed::Sealed for WithoutTools {}
+    impl sealed::Sealed for WithTools {}
+
+    impl MessageState for NeedsMessage {}
+    impl MessageState for HasMessages {}
+    impl ToolState for WithoutTools {}
+    impl ToolState for WithTools {}
+}
+
+use request_state::{HasMessages, MessageState, NeedsMessage, ToolState, WithTools, WithoutTools};
+
+/// A typestate builder that makes invalid request-construction sequences fail
+/// to compile.
+///
+/// `M` witnesses whether the builder has a message, and `T` witnesses whether
+/// it has a tool. Methods consume one state and return the next legal state.
+/// In categorical terms, the state types are objects and the available methods
+/// are composable morphisms; Rust's trait bounds reject illegal compositions.
+///
+/// # Example
+///
+/// ```
+/// use edge_completions::{ChatMessage, ChatRequest};
+///
+/// let request = ChatRequest::kimi_k3_builder()
+///     .message(ChatMessage::user("Explain typestate briefly."))
+///     .build();
+///
+/// assert_eq!(request.model().as_str(), "moonshotai/kimi-k3");
+/// ```
+///
+/// # Compile-time guarantees
+///
+/// A request without a message has no `build` method:
+///
+/// ```compile_fail
+/// use edge_completions::ChatRequest;
+///
+/// let _request = ChatRequest::kimi_k3_builder().build();
+/// ```
+///
+/// A tool choice cannot be selected before a tool exists:
+///
+/// ```compile_fail
+/// use edge_completions::{ChatRequest, ToolChoice};
+///
+/// let _builder = ChatRequest::kimi_k3_builder()
+///     .tool_choice(ToolChoice::Required);
+/// ```
+#[must_use = "request builders must be transitioned and built"]
+#[derive(Debug, Clone)]
+pub struct ChatRequestBuilder<M: MessageState, T: ToolState> {
+    model: ModelId,
+    messages: Vec<ChatMessage>,
+    tools: Vec<FunctionTool>,
+    tool_choice: Option<ToolChoice>,
+    temperature: Option<Temperature>,
+    max_tokens: Option<MaxTokens>,
+    state: PhantomData<(M, T)>,
+}
+
+impl<M: MessageState, T: ToolState> ChatRequestBuilder<M, T> {
+    fn transition<NextM: MessageState, NextT: ToolState>(self) -> ChatRequestBuilder<NextM, NextT> {
+        ChatRequestBuilder {
+            model: self.model,
+            messages: self.messages,
+            tools: self.tools,
+            tool_choice: self.tool_choice,
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            state: PhantomData,
+        }
+    }
+
+    /// Sets a validated sampling temperature without changing either state witness.
+    pub fn temperature(mut self, temperature: Temperature) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Sets a validated completion-token limit without changing either state witness.
+    pub fn max_tokens(mut self, max_tokens: MaxTokens) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+}
+
+impl<T: ToolState> ChatRequestBuilder<NeedsMessage, T> {
+    /// Adds the first message and returns the [`HasMessages`] witness state.
+    pub fn message(mut self, message: ChatMessage) -> ChatRequestBuilder<HasMessages, T> {
+        self.messages.push(message);
+        self.transition()
+    }
+}
+
+impl<T: ToolState> ChatRequestBuilder<HasMessages, T> {
+    /// Appends another message while preserving the [`HasMessages`] witness.
+    pub fn message(mut self, message: ChatMessage) -> Self {
+        self.messages.push(message);
+        self
+    }
+
+    /// Builds a request after the [`HasMessages`] witness proves that it is non-empty.
+    #[must_use]
+    pub fn build(self) -> ChatRequest {
+        ChatRequest {
+            model: self.model,
+            messages: self.messages,
+            tools: self.tools,
+            tool_choice: self.tool_choice,
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+        }
+    }
+}
+
+impl<M: MessageState> ChatRequestBuilder<M, WithoutTools> {
+    /// Adds the first tool and returns the [`WithTools`] witness state.
+    ///
+    /// Tool selection defaults to [`ToolChoice::Auto`] and can be changed only
+    /// after this transition.
+    pub fn tool(mut self, tool: FunctionTool) -> ChatRequestBuilder<M, WithTools> {
+        self.tools.push(tool);
+        self.tool_choice = Some(ToolChoice::Auto);
+        self.transition()
+    }
+}
+
+impl<M: MessageState> ChatRequestBuilder<M, WithTools> {
+    /// Appends another tool while preserving the [`WithTools`] witness.
+    pub fn tool(mut self, tool: FunctionTool) -> Self {
+        self.tools.push(tool);
+        self
+    }
+
+    /// Selects the provider's tool-choice setting after at least one tool exists.
+    pub fn tool_choice(mut self, choice: ToolChoice) -> Self {
+        self.tool_choice = Some(choice);
+        self
+    }
+}
+
 /// A validated, serializable chat-completion request.
+///
+/// Prefer [`ChatRequest::builder`] or [`ChatRequest::kimi_k3_builder`] for new
+/// code. Their state parameters make an empty request impossible to build.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChatRequest {
     model: ModelId,
@@ -302,12 +589,45 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
+    /// Starts a typestate builder for a validated model.
+    pub fn builder(model: ModelId) -> ChatRequestBuilder<NeedsMessage, WithoutTools> {
+        ChatRequestBuilder {
+            model,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            temperature: None,
+            max_tokens: None,
+            state: PhantomData,
+        }
+    }
+
+    /// Starts a typestate builder for `moonshotai/kimi-k3`.
+    pub fn kimi_k3_builder() -> ChatRequestBuilder<NeedsMessage, WithoutTools> {
+        Self::builder(ModelId::kimi_k3())
+    }
+
     /// Creates a request for `moonshotai/kimi-k3` with at least one message.
+    ///
+    /// This compatibility constructor performs the message-cardinality check at
+    /// runtime. New code can use [`ChatRequest::kimi_k3_builder`] to move the
+    /// same invariant to compile time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::EmptyMessages`] when `messages` is empty.
     pub fn kimi_k3(messages: Vec<ChatMessage>) -> Result<Self, InvalidConfiguration> {
         Self::new(ModelId::kimi_k3(), messages)
     }
 
     /// Creates a request for a validated model with at least one message.
+    ///
+    /// This compatibility constructor performs the message-cardinality check at
+    /// runtime. New code can use [`ChatRequest::builder`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::EmptyMessages`] when `messages` is empty.
     pub fn new(model: ModelId, messages: Vec<ChatMessage>) -> Result<Self, InvalidConfiguration> {
         if messages.is_empty() {
             return Err(InvalidConfiguration::EmptyMessages);
@@ -322,7 +642,7 @@ impl ChatRequest {
         })
     }
 
-    /// Enables one typed function tool using the selected choice policy.
+    /// Enables one typed function tool using the selected tool choice.
     #[must_use]
     pub fn with_tool(mut self, tool: FunctionTool, choice: ToolChoice) -> Self {
         self.tools = vec![tool];
@@ -330,7 +650,15 @@ impl ChatRequest {
         self
     }
 
-    /// Enables one or more typed function tools using the selected choice policy.
+    /// Enables one or more typed function tools using the selected tool choice.
+    ///
+    /// This compatibility method validates tool cardinality at runtime. The
+    /// typestate builder makes [`ChatRequestBuilder::tool_choice`] available only
+    /// after at least one call to [`ChatRequestBuilder::tool`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::EmptyTools`] when `tools` is empty.
     pub fn with_tools(
         mut self,
         tools: Vec<FunctionTool>,
@@ -402,6 +730,11 @@ impl ChatCompletion {
     }
 
     /// Returns the first choice or a typed missing-choice error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MissingChoice`] when the provider response contains no
+    /// choices.
     pub fn first_choice(&self) -> Result<&ChatChoice, Error> {
         self.choices.first().ok_or(Error::MissingChoice)
     }
@@ -469,7 +802,53 @@ pub struct AssistantMessage {
     tool_calls: Vec<ToolCall>,
 }
 
+/// Exhaustive alternatives carried by a typed assistant message.
+///
+/// This enum is a sum type (a coproduct): callers must select one branch for
+/// every supported provider outcome. `TextAndToolCalls` preserves providers
+/// that return both values rather than silently discarding either one.
+///
+/// ```
+/// use edge_completions::{AssistantMessage, AssistantOutput};
+///
+/// fn output_kind(message: &AssistantMessage) -> &'static str {
+///     match message.output() {
+///         AssistantOutput::Text(_) => "text",
+///         AssistantOutput::ToolCalls(_) => "tools",
+///         AssistantOutput::TextAndToolCalls { .. } => "text-and-tool-calls",
+///         AssistantOutput::Empty => "empty",
+///     }
+/// }
+/// ```
+#[must_use = "assistant output should be handled explicitly"]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AssistantOutput<'a> {
+    /// The assistant returned final text without tool calls.
+    Text(&'a str),
+    /// The assistant proposed tool calls without text.
+    ToolCalls(&'a [ToolCall]),
+    /// The assistant returned text and proposed one or more tool calls.
+    TextAndToolCalls {
+        /// Provider-generated assistant text.
+        text: &'a str,
+        /// Untrusted tool calls that still require typed validation.
+        tool_calls: &'a [ToolCall],
+    },
+    /// The assistant returned neither text nor tool calls.
+    Empty,
+}
+
 impl AssistantMessage {
+    /// Classifies assistant output into an exhaustive typed alternative.
+    pub fn output(&self) -> AssistantOutput<'_> {
+        match (self.content.as_deref(), self.tool_calls.as_slice()) {
+            (Some(text), []) => AssistantOutput::Text(text),
+            (None, []) => AssistantOutput::Empty,
+            (None, tool_calls) => AssistantOutput::ToolCalls(tool_calls),
+            (Some(text), tool_calls) => AssistantOutput::TextAndToolCalls { text, tool_calls },
+        }
+    }
+
     /// Returns text content when the assistant produced a final answer.
     #[must_use]
     pub fn content(&self) -> Option<&str> {
@@ -483,6 +862,11 @@ impl AssistantMessage {
     }
 
     /// Returns the first proposed tool call or a typed missing-call error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MissingToolCall`] when the assistant proposed no tool
+    /// calls.
     pub fn first_tool_call(&self) -> Result<&ToolCall, Error> {
         self.tool_calls.first().ok_or(Error::MissingToolCall)
     }
@@ -501,6 +885,103 @@ pub struct ToolCall {
     #[serde(rename = "type")]
     kind: ToolCallKind,
     function: ToolCallFunction,
+}
+
+/// Proof that a model-produced tool call matched and decoded through `T`.
+///
+/// The witness binds the validated arguments and any encoded result to the
+/// same [`ToolDefinition`]. Construct it only through [`ToolCall::validate`].
+///
+/// A validated call gives application code typed arguments and accepts only the
+/// matching output type:
+///
+/// ```
+/// use edge_completions::{ChatMessage, ToolCall, ToolDefinition, ToolError};
+/// use schemars::JsonSchema;
+/// use serde::{Deserialize, Serialize};
+///
+/// struct LookupWeather;
+/// #[derive(Deserialize, JsonSchema)]
+/// struct Arguments { city: String }
+/// #[derive(Serialize)]
+/// struct Report { temperature_celsius: i16 }
+///
+/// impl ToolDefinition for LookupWeather {
+///     type Arguments = Arguments;
+///     type Output = Report;
+///     const NAME: &'static str = "lookup_weather";
+///     const DESCRIPTION: &'static str = "Look up weather";
+/// }
+///
+/// fn result_for(call: &ToolCall) -> Result<ChatMessage, ToolError> {
+///     let validated = call.validate::<LookupWeather>()?;
+///     assert!(!validated.arguments().city.is_empty());
+///     validated.result(&Report { temperature_celsius: 18 })
+/// }
+/// ```
+///
+/// Passing a different output type fails to compile:
+///
+/// ```compile_fail
+/// use edge_completions::{ToolCall, ToolDefinition, ToolError};
+/// use schemars::JsonSchema;
+/// use serde::{Deserialize, Serialize};
+///
+/// struct LookupWeather;
+/// #[derive(Deserialize, JsonSchema)]
+/// struct Arguments { city: String }
+/// #[derive(Serialize)]
+/// struct WeatherReport { temperature_celsius: i16 }
+///
+/// impl ToolDefinition for LookupWeather {
+///     type Arguments = Arguments;
+///     type Output = WeatherReport;
+///     const NAME: &'static str = "lookup_weather";
+///     const DESCRIPTION: &'static str = "Look up weather";
+/// }
+///
+/// fn invalid_result(call: &ToolCall) -> Result<(), ToolError> {
+///     let validated = call.validate::<LookupWeather>()?;
+///     validated.result(&String::from("wrong output type"))?;
+///     Ok(())
+/// }
+/// ```
+#[must_use = "validated tool calls should be inspected or converted into results"]
+pub struct ValidatedToolCall<'a, T: ToolDefinition> {
+    call: &'a ToolCall,
+    arguments: T::Arguments,
+    tool: PhantomData<T>,
+}
+
+impl<T: ToolDefinition> ValidatedToolCall<'_, T> {
+    /// Returns the validated arguments associated with `T`.
+    #[must_use]
+    pub fn arguments(&self) -> &T::Arguments {
+        &self.arguments
+    }
+
+    /// Consumes the proof and returns its validated arguments.
+    #[must_use]
+    pub fn into_arguments(self) -> T::Arguments {
+        self.arguments
+    }
+
+    /// Encodes an output whose type is associated with the same tool proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::ResultEncoding`] when `result` cannot be serialized.
+    /// A name mismatch is unrepresentable here because this witness is created
+    /// only after [`ToolCall::validate`] succeeds for the same `T`.
+    pub fn result(&self, result: &T::Output) -> Result<ChatMessage, ToolError> {
+        ChatMessage::tool_result::<T>(self.call, result)
+    }
+
+    /// Returns the underlying provider tool-call identifier.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        self.call.id()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -529,15 +1010,47 @@ impl ToolCall {
         &self.function.name
     }
 
-    /// Validates the proposed name and decodes arguments into `T::Arguments`.
-    pub fn arguments_for<T: ToolDefinition>(&self) -> Result<T::Arguments, ToolError> {
+    /// Validates the proposed name and arguments, returning a proof bound to
+    /// the matching tool contract.
+    ///
+    /// This is a runtime trust-boundary check: tool calls come from the model and
+    /// cannot be proven valid at compile time. After validation, the returned
+    /// witness carries the established relationship between `T::Arguments` and
+    /// `T::Output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::UnexpectedName`] when the model proposed a different
+    /// function, or [`ToolError::InvalidArguments`] when the arguments cannot be
+    /// decoded into `T::Arguments`.
+    pub fn validate<T: ToolDefinition>(&self) -> Result<ValidatedToolCall<'_, T>, ToolError> {
         self.ensure_name::<T>()?;
-        serde_json::from_str(&self.function.arguments).map_err(|source| {
+        let arguments = serde_json::from_str(&self.function.arguments).map_err(|source| {
             ToolError::InvalidArguments {
                 tool: self.name().to_owned(),
                 source,
             }
+        })?;
+        Ok(ValidatedToolCall {
+            call: self,
+            arguments,
+            tool: PhantomData,
         })
+    }
+
+    /// Validates the proposed name and decodes arguments into `T::Arguments`.
+    ///
+    /// Prefer [`ToolCall::validate`] when the application also needs to encode a
+    /// result. This compatibility helper consumes the proof and returns only the
+    /// validated arguments.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::UnexpectedName`] when the model proposed a different
+    /// function, or [`ToolError::InvalidArguments`] when the arguments cannot be
+    /// decoded into `T::Arguments`.
+    pub fn arguments_for<T: ToolDefinition>(&self) -> Result<T::Arguments, ToolError> {
+        Ok(self.validate::<T>()?.into_arguments())
     }
 
     fn ensure_name<T: ToolDefinition>(&self) -> Result<(), ToolError> {
@@ -635,6 +1148,14 @@ mod tests {
         }
     }
 
+    fn assistant_message(content: Option<&str>, tool_calls: Vec<ToolCall>) -> AssistantMessage {
+        AssistantMessage {
+            role: AssistantRole::Assistant,
+            content: content.map(ToOwned::to_owned),
+            tool_calls,
+        }
+    }
+
     #[test]
     fn serializes_required_function_tool_request() -> Result<(), Box<dyn std::error::Error>> {
         let request = ChatRequest::kimi_k3(vec![ChatMessage::user("What is the weather?")])?
@@ -653,6 +1174,64 @@ mod tests {
             "object"
         );
         Ok(())
+    }
+
+    #[test]
+    fn typestate_builder_preserves_the_existing_request_contract()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tool = FunctionTool::for_tool::<GetWeather>()?;
+        let legacy = ChatRequest::kimi_k3(vec![ChatMessage::user("What is the weather?")])?
+            .with_tool(tool.clone(), ToolChoice::Required);
+        let typestate = ChatRequest::kimi_k3_builder()
+            .tool(tool)
+            .tool_choice(ToolChoice::Required)
+            .message(ChatMessage::user("What is the weather?"))
+            .build();
+
+        assert_eq!(typestate, legacy);
+        Ok(())
+    }
+
+    #[test]
+    fn independent_builder_endomorphisms_commute() -> Result<(), Box<dyn std::error::Error>> {
+        let temperature = Temperature::new(0.4)?;
+        let max_tokens = MaxTokens::new(120)?;
+        let temperature_then_tokens = ChatRequest::kimi_k3_builder()
+            .temperature(temperature)
+            .max_tokens(max_tokens)
+            .message(ChatMessage::user("Explain composition"))
+            .build();
+        let tokens_then_temperature = ChatRequest::kimi_k3_builder()
+            .max_tokens(max_tokens)
+            .temperature(temperature)
+            .message(ChatMessage::user("Explain composition"))
+            .build();
+
+        assert_eq!(temperature_then_tokens, tokens_then_temperature);
+        Ok(())
+    }
+
+    #[test]
+    fn classifies_every_assistant_output_sum_variant() {
+        let call = tool_call("get_weather", r#"{"city":"Paris"}"#);
+        let text = assistant_message(Some("Clear skies"), Vec::new());
+        let tools = assistant_message(None, vec![call.clone()]);
+        let both = assistant_message(Some("Checking"), vec![call]);
+        let empty = assistant_message(None, Vec::new());
+
+        assert_eq!(text.output(), AssistantOutput::Text("Clear skies"));
+        assert!(matches!(
+            tools.output(),
+            AssistantOutput::ToolCalls(tool_calls) if tool_calls.len() == 1
+        ));
+        assert!(matches!(
+            both.output(),
+            AssistantOutput::TextAndToolCalls {
+                text: "Checking",
+                tool_calls
+            } if tool_calls.len() == 1
+        ));
+        assert_eq!(empty.output(), AssistantOutput::Empty);
     }
 
     #[test]
@@ -700,6 +1279,27 @@ mod tests {
             WeatherArgs {
                 city: "Paris".into()
             }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validated_tool_call_carries_arguments_and_output_contract()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let call = tool_call("get_weather", r#"{"city":"Paris"}"#);
+        let validated = call.validate::<GetWeather>()?;
+
+        assert_eq!(validated.id(), "call_1");
+        assert_eq!(validated.arguments().city, "Paris");
+        assert_eq!(
+            serde_json::to_value(validated.result(&WeatherReport {
+                temperature_celsius: 18,
+            })?)?,
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "{\"temperature_celsius\":18}"
+            })
         );
         Ok(())
     }

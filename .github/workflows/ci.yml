@@ -69,9 +69,12 @@ jobs:
       - name: Run Clippy
         run: cargo +stable clippy --locked --all-targets --all-features -- -D warnings
 
+      - name: Test documentation examples
+        run: cargo +stable test --locked --doc --all-features
+
       - name: Build strict documentation
         env:
-          RUSTDOCFLAGS: -D warnings
+          RUSTDOCFLAGS: -D warnings -D missing_docs
         run: cargo +stable doc --locked --no-deps --all-features
 
       - name: Build the crates.io package

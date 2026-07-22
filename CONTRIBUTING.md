@@ -9,9 +9,10 @@ Then run the same checks used by CI:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc --locked --no-deps --all-features
+cargo test --locked --doc --all-features
 cargo deny check
 cargo audit
 ```
@@ -25,15 +26,33 @@ pull requests.
 - Keep `ChatCompletions` as the application-facing trait boundary.
 - Keep provider transport data private and expose only typed domain objects.
 - Treat model-produced tool names and arguments as untrusted input.
+- Preserve the request typestate and proof-carrying tool boundary. Add a
+  compile-fail doctest when a new illegal sequence should be rejected by Rust.
+- Model response alternatives with semantic enums and exhaustive matches.
 - Use `thiserror` for library errors; do not panic on fallible production paths.
 - Avoid adding untyped extension maps or `serde_json::Value` to the public API.
 - Keep tool execution and authorization in the calling application.
+- Use category-theory terms only when they clarify a concrete type, transition,
+  composition law, or testable invariant.
+
+## Documentation
+
+- Write direct international English with short sentences and consistent terms.
+- Put developer tasks and runnable examples before theory.
+- Add `# Errors` to every fallible public API and `# Panics` when a public API
+  can panic. The crate treats missing sections as Clippy warnings.
+- Explain which guarantees occur at compile time and which checks remain at
+  runtime because they depend on external data.
+- Keep examples free of credentials, account identifiers, captured provider
+  bodies, and machine-specific paths.
+- Verify Rust examples with doctests and confirm CLI examples against the real
+  command help and contract tests.
 
 ## Pull requests
 
-Keep changes focused, update public documentation and `CHANGELOG.md`, add tests
-for behavior changes, and explain any compatibility impact. Maintainers may ask
-for a changeset to be split when unrelated concerns are combined.
+Keep changes focused. Update public documentation and `CHANGELOG.md`, add tests
+for behavior changes, and explain compatibility impact. Maintainers may ask for
+a changeset to be split when it combines unrelated concerns.
 
 By contributing, you agree that your contribution is licensed under the
 project's MIT OR Apache-2.0 license.

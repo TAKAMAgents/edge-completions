@@ -27,15 +27,37 @@ pub const API_TOKEN_ENV: &str = "CLOUDFLARE_API_TOKEN";
 #[async_trait::async_trait]
 pub trait ChatCompletions: Send + Sync {
     /// Executes one typed chat-completion request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`Error`] when local configuration, transport, provider
+    /// status, response bounds, response decoding, or required response content
+    /// prevents completion. Implementations must not expose credentials or raw
+    /// provider bodies through the error.
     async fn complete(&self, request: &ChatRequest) -> Result<ChatCompletion, Error>;
 }
 
 /// A validated Cloudflare account identifier.
+///
+/// ```
+/// use edge_completions::AccountId;
+///
+/// let account = AccountId::new("account-123")?;
+/// assert_eq!(account.as_str(), "account-123");
+/// # Ok::<(), edge_completions::InvalidConfiguration>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AccountId(String);
 
 impl AccountId {
     /// Validates and constructs an account identifier.
+    ///
+    /// Leading and trailing whitespace is removed before storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::EmptyAccountId`] when the trimmed value
+    /// is empty.
     pub fn new(value: impl Into<String>) -> Result<Self, InvalidConfiguration> {
         let value = value.into();
         let trimmed = value.trim();
@@ -69,11 +91,27 @@ impl TryFrom<&str> for AccountId {
 }
 
 /// A validated API token whose debug output is always redacted.
+///
+/// ```
+/// use edge_completions::ApiToken;
+///
+/// let token = ApiToken::new("secret-value")?;
+/// assert_eq!(format!("{token:?}"), "ApiToken([REDACTED])");
+/// # Ok::<(), edge_completions::InvalidConfiguration>(())
+/// ```
 #[derive(Clone, PartialEq, Eq)]
 pub struct ApiToken(String);
 
 impl ApiToken {
     /// Validates and constructs an API token.
+    ///
+    /// The original token bytes are retained for authentication, while
+    /// [`Debug`](std::fmt::Debug) always emits a redacted value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::EmptyApiToken`] when the value contains
+    /// only whitespace.
     pub fn new(value: impl Into<String>) -> Result<Self, InvalidConfiguration> {
         let value = value.into();
         if value.trim().is_empty() {
@@ -109,11 +147,26 @@ impl TryFrom<&str> for ApiToken {
 ///
 /// HTTPS is required except for loopback hosts, which are permitted so callers
 /// can run local contract tests without sending credentials over a network.
+///
+/// ```
+/// use edge_completions::ApiBaseUrl;
+///
+/// let base = ApiBaseUrl::new("https://api.cloudflare.com/client/v4/")?;
+/// assert_eq!(base.as_url().scheme(), "https");
+/// # Ok::<(), edge_completions::InvalidConfiguration>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiBaseUrl(Url);
 
 impl ApiBaseUrl {
     /// Parses and validates a provider API base URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::InvalidBaseUrl`] when the value is not a
+    /// hierarchical URL with a host, contains embedded credentials, or includes
+    /// a query or fragment. Returns [`InvalidConfiguration::InsecureBaseUrl`]
+    /// when a non-loopback URL does not use HTTPS.
     pub fn new(value: impl AsRef<str>) -> Result<Self, InvalidConfiguration> {
         let url =
             Url::parse(value.as_ref()).map_err(|source| InvalidConfiguration::InvalidBaseUrl {
@@ -166,11 +219,24 @@ impl TryFrom<&str> for ApiBaseUrl {
 }
 
 /// A validated request timeout.
+///
+/// ```
+/// use std::time::Duration;
+/// use edge_completions::RequestTimeout;
+///
+/// let timeout = RequestTimeout::new(Duration::from_secs(15))?;
+/// assert_eq!(timeout.duration(), Duration::from_secs(15));
+/// # Ok::<(), edge_completions::InvalidConfiguration>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestTimeout(Duration);
 
 impl RequestTimeout {
     /// Creates a non-zero request timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::ZeroTimeout`] when `value` is zero.
     pub fn new(value: Duration) -> Result<Self, InvalidConfiguration> {
         if value.is_zero() {
             return Err(InvalidConfiguration::ZeroTimeout);
@@ -192,11 +258,24 @@ impl Default for RequestTimeout {
 }
 
 /// A validated maximum response-body size.
+///
+/// ```
+/// use edge_completions::ResponseSizeLimit;
+///
+/// let limit = ResponseSizeLimit::new(1_048_576)?;
+/// assert_eq!(limit.bytes(), 1_048_576);
+/// # Ok::<(), edge_completions::InvalidConfiguration>(())
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResponseSizeLimit(usize);
 
 impl ResponseSizeLimit {
     /// Creates a non-zero response-body byte limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::ZeroResponseSizeLimit`] when `bytes` is
+    /// zero.
     pub fn new(bytes: usize) -> Result<Self, InvalidConfiguration> {
         if bytes == 0 {
             return Err(InvalidConfiguration::ZeroResponseSizeLimit);
@@ -218,11 +297,24 @@ impl Default for ResponseSizeLimit {
 }
 
 /// A validated value for Cloudflare's optional `cf-aig-gateway-id` header.
+///
+/// ```
+/// use edge_completions::GatewayId;
+///
+/// let gateway = GatewayId::new("production-gateway")?;
+/// assert_eq!(gateway.as_str(), "production-gateway");
+/// # Ok::<(), edge_completions::InvalidConfiguration>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayId(String);
 
 impl GatewayId {
     /// Validates and constructs an AI Gateway identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidConfiguration::InvalidGatewayId`] when the value is
+    /// empty or cannot be represented safely as an HTTP header value.
     pub fn new(value: impl Into<String>) -> Result<Self, InvalidConfiguration> {
         let value = value.into();
         if value.trim().is_empty() || header::HeaderValue::from_str(&value).is_err() {
@@ -255,6 +347,20 @@ impl TryFrom<&str> for GatewayId {
 }
 
 /// HTTP implementation of the typed chat-completion capability.
+///
+/// Construct a client from validated credentials without performing a network
+/// request:
+///
+/// ```
+/// use edge_completions::{AccountId, ApiToken, Client};
+///
+/// let client = Client::new(
+///     AccountId::new("account-123")?,
+///     ApiToken::new("test-token")?,
+/// );
+/// assert!(client.is_ok());
+/// # Ok::<(), edge_completions::Error>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct Client {
     http: reqwest::Client,
@@ -267,6 +373,14 @@ pub struct Client {
 impl Client {
     /// Creates a client from `CLOUDFLARE_ACCOUNT_ID` and
     /// `CLOUDFLARE_API_TOKEN`.
+    ///
+    /// `KIMI3_ON_CLOUDFLARE_API_KEY` is accepted only as a compatibility
+    /// fallback when `CLOUDFLARE_API_TOKEN` is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] when a credential is missing or
+    /// invalid, and [`Error::Transport`] when the HTTP client cannot be built.
     pub fn from_env() -> Result<Self, Error> {
         Self::builder_from_env()?.build()
     }
@@ -300,6 +414,12 @@ impl Client {
     }
 
     /// Creates a client from validated credentials using default transport settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if the default API endpoint
+    /// cannot satisfy the base-URL contract, or [`Error::Transport`] if the HTTP
+    /// client cannot be initialized.
     pub fn new(account_id: AccountId, api_token: ApiToken) -> Result<Self, Error> {
         Self::builder(account_id, api_token).build()
     }
@@ -311,6 +431,17 @@ impl Client {
     }
 
     /// Executes one typed chat-completion request.
+    ///
+    /// This method performs no automatic retry and never executes proposed
+    /// tools. The caller owns retry policy, authorization, and side effects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Transport`] for an incomplete HTTP exchange,
+    /// [`Error::ResponseTooLarge`] when the configured body limit is exceeded,
+    /// [`Error::Provider`] for a non-success status, or
+    /// [`Error::InvalidResponse`] when a successful body violates the supported
+    /// response contract.
     pub async fn chat(&self, request: &ChatRequest) -> Result<ChatCompletion, Error> {
         let mut call = self
             .http
@@ -369,6 +500,20 @@ impl ChatCompletions for Client {
 }
 
 /// Builder for transport policy and optional Cloudflare AI Gateway routing.
+///
+/// ```
+/// use std::time::Duration;
+/// use edge_completions::{AccountId, ApiToken, Client, RequestTimeout};
+///
+/// let client = Client::builder(
+///     AccountId::new("account-123")?,
+///     ApiToken::new("test-token")?,
+/// )
+/// .timeout(RequestTimeout::new(Duration::from_secs(15))?)
+/// .build();
+/// assert!(client.is_ok());
+/// # Ok::<(), edge_completions::Error>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct ClientBuilder {
     account_id: AccountId,
@@ -420,6 +565,12 @@ impl ClientBuilder {
     }
 
     /// Validates transport configuration and creates the client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConfiguration`] if the selected API base cannot
+    /// form the chat-completions endpoint, or [`Error::Transport`] if the HTTP
+    /// client cannot be initialized.
     pub fn build(self) -> Result<Client, Error> {
         let base_url = match self.base_url {
             Some(base_url) => base_url,

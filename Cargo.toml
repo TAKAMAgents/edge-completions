@@ -1,6 +1,6 @@
 [package]
 name = "edge-completions"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.86"
 description = "Typed Rust SDK and CLI for OpenAI-compatible chat completions through Cloudflare"
