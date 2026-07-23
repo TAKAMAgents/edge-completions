@@ -5,6 +5,9 @@ over the same typed SDK. It sends non-streaming chat requests and writes only
 validated assistant text to standard output. It never prints credentials or raw
 provider request and response envelopes.
 
+The binary creates a current-thread Tokio runtime for the `chat` command. The
+library itself never creates a runtime or background task.
+
 ## Fast path
 
 1. Export `CLOUDFLARE_ACCOUNT_ID` and either `CLOUDFLARE_API_TOKEN` or the
@@ -35,6 +38,9 @@ export CLOUDFLARE_API_TOKEN="your_least_privilege_api_token"
 
 `KIMI3_ON_CLOUDFLARE_API_KEY` remains a compatibility fallback for the token.
 New setups should use `CLOUDFLARE_API_TOKEN`.
+
+Use `wrangler whoami` to inspect the account ID associated with an installed
+Wrangler session, or copy it from the Cloudflare account dashboard.
 
 Do not place credentials in command arguments. Arguments may be retained in
 shell history or visible to local process-inspection tools.
@@ -95,6 +101,8 @@ and zero-token-limit inputs fail before an API request.
 ## Global options
 
 `--gateway-id <GATEWAY_ID>` adds Cloudflare's AI Gateway routing header.
+Omit it to use Cloudflare's default gateway for third-party models such as
+Kimi K3.
 
 `--base-url <URL>` changes the Cloudflare API base. HTTPS is required, except
 for an HTTP loopback address used by local contract tests. The bearer token is
@@ -127,6 +135,10 @@ The command does not emit JSON and does not offer a raw-output mode. A response
 that contains no final assistant text is a typed error. Tool execution remains
 an explicit responsibility of application code using the library API.
 
+The command makes one request without automatic retry. The SDK's configured
+whole-request deadline covers connection establishment and complete response
+body delivery.
+
 ## Common errors
 
 ### Missing environment variable
@@ -158,6 +170,17 @@ prints text only and does not execute tools.
 
 How to fix: use the library API and match `AssistantOutput` when the application
 needs typed tool calls.
+
+### Provider request timed out
+
+What it means: the configured whole-request deadline elapsed before the complete
+response body arrived. The SDK cancelled the HTTP exchange and returned a typed
+`Error::Timeout`.
+
+How to fix: check provider availability and network latency before increasing
+the timeout in a library integration. Do not blindly retry application tool
+actions; tool execution is outside this CLI and requires its own idempotency
+policy.
 
 ### Provider API base URL must use HTTPS
 

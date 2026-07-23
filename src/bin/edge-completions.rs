@@ -223,10 +223,10 @@ impl ChatArguments {
     }
 }
 
-async fn complete_text(
-    completions: &dyn ChatCompletions,
-    request: &ChatRequest,
-) -> Result<String, CommandError> {
+async fn complete_text<C>(completions: &C, request: &ChatRequest) -> Result<String, CommandError>
+where
+    C: ChatCompletions,
+{
     let completion = completions.complete(request).await?;
     match completion.first_choice()?.message().output() {
         AssistantOutput::Text(text) | AssistantOutput::TextAndToolCalls { text, .. } => {

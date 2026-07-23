@@ -14,9 +14,15 @@ mod types;
 #[doc = include_str!("../docs/TYPE_SYSTEM.md")]
 pub mod type_system {}
 
+/// Native async dispatch, explicit type erasure, cancellation, and deadlines.
+///
+/// This module contains documentation only.
+#[doc = include_str!("../docs/ASYNC.md")]
+pub mod async_model {}
+
 pub use client::{
-    ACCOUNT_ID_ENV, API_TOKEN_ENV, AccountId, ApiBaseUrl, ApiToken, ChatCompletions, Client,
-    ClientBuilder, GatewayId, RequestTimeout, ResponseSizeLimit,
+    ACCOUNT_ID_ENV, API_TOKEN_ENV, AccountId, ApiBaseUrl, ApiToken, BoxChatFuture, ChatCompletions,
+    Client, ClientBuilder, DynChatCompletions, GatewayId, RequestTimeout, ResponseSizeLimit,
 };
 pub use error::{Error, InvalidConfiguration, ProviderErrorCode, ProviderFailure, ToolError};
 pub use types::request_state;

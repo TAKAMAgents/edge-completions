@@ -7,7 +7,8 @@
 
 An ergonomic, typed Rust SDK and optional command-line client for
 OpenAI-compatible chat completions through Cloudflare. The first supported
-convenience model is `moonshotai/kimi-k3`.
+convenience model is
+[`moonshotai/kimi-k3`](https://developers.cloudflare.com/ai/models/moonshotai/kimi-k3/).
 
 This is an independent open-source project. It is not affiliated with,
 endorsed by, or sponsored by Cloudflare, Inc. Cloudflare is a trademark of
@@ -15,7 +16,9 @@ Cloudflare, Inc.
 
 ## Why this crate
 
-- A small, object-safe `ChatCompletions` trait for application boundaries.
+- A native `ChatCompletions` trait with `Send` futures and no boxing on the
+  generic path.
+- An explicit `DynChatCompletions` adapter when runtime type erasure is needed.
 - A sealed typestate request builder that rejects illegal construction
   sequences at compile time.
 - Validated newtypes for account IDs, API tokens, models, URLs, timeouts, and limits.
@@ -23,6 +26,8 @@ Cloudflare, Inc.
   escape hatch.
 - `thiserror` errors for configuration, transport, provider, response, and tool
   failures.
+- Drop-based request cancellation, typed whole-request timeouts, and no hidden
+  retry or background-task policy.
 - Redacted token debug output and bounded response-body decoding.
 - An opt-in `edge-completions` command that prints typed assistant text and
   never prints provider envelopes.
@@ -47,8 +52,8 @@ The `cli` feature is intentionally disabled for library consumers, so SDK-only
 builds do not compile command-line dependencies. The minimum supported Rust
 version is 1.86.
 
-Applications using the asynchronous examples also need Tokio. Typed tool
-definitions use Schemars and Serde:
+Reqwest's asynchronous transport is Tokio-backed, so applications using the
+SDK need a Tokio runtime. Typed tool definitions use Schemars and Serde:
 
 ```bash
 cargo add tokio --features macros,rt-multi-thread
@@ -72,7 +77,14 @@ applications should use `CLOUDFLARE_API_TOKEN`.
 You can find the account ID in the Cloudflare dashboard after selecting your
 account, or follow Cloudflare's
 [account and zone ID guide](https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/).
+If Wrangler is installed, `wrangler whoami` also reports the active account ID.
 Never commit either value.
+
+Cloudflare routes third-party models such as Kimi K3 through the account's
+default AI Gateway when no gateway header is present. Set `GatewayId` only when
+the request must use a named gateway. Follow Cloudflare's
+[AI Gateway setup guide](https://developers.cloudflare.com/ai-gateway/get-started/)
+when selecting least-privilege token permissions.
 
 ## Command line
 
@@ -258,11 +270,75 @@ See the [type-system guide](https://docs.rs/edge-completions/latest/edge_complet
 for the complete state graph, compile-fail examples, and the boundary between
 static guarantees and runtime checks.
 
+## Native async boundary
+
+Use generic dispatch for the normal application boundary:
+
+```rust,no_run
+use edge_completions::{
+    ChatCompletion, ChatCompletions, ChatRequest, Error,
+};
+
+async fn answer<C>(
+    ai: &C,
+    request: &ChatRequest,
+) -> Result<ChatCompletion, Error>
+where
+    C: ChatCompletions,
+{
+    ai.complete(request).await
+}
+```
+
+`ChatCompletions::complete` returns `impl Future + Send`. The static path keeps
+the concrete future and performs no heap allocation for trait dispatch.
+
+Use explicit type erasure only when the concrete implementation is selected at
+runtime:
+
+```rust,no_run
+use edge_completions::{
+    ChatCompletion, ChatRequest, DynChatCompletions, Error,
+};
+
+async fn answer_dynamic(
+    ai: &dyn DynChatCompletions,
+    request: &ChatRequest,
+) -> Result<ChatCompletion, Error> {
+    ai.complete_boxed(request).await
+}
+```
+
+`DynChatCompletions` returns `BoxChatFuture`, making its one allocation per call
+visible in the API. See the
+[async execution guide](https://docs.rs/edge-completions/latest/edge_completions/async_model/)
+for cancellation, deadlines, concurrency, runtime ownership, and retry policy.
+
+Dropping either future cancels the in-flight exchange. The SDK spawns no task,
+retains no partial response, and performs no retry. `RequestTimeout` covers the
+connection and complete response body; expiry returns `Error::Timeout`.
+
+## Migrating from 0.3
+
+Version 0.4 replaces the `async-trait` capability method with a native Rust
+future. This is an intentional pre-1.0 compatibility change.
+
+| 0.3 API | 0.4 replacement |
+| --- | --- |
+| `&dyn ChatCompletions` | Generic `C: ChatCompletions` |
+| `Arc<dyn ChatCompletions>` | `Arc<dyn DynChatCompletions>` |
+| `ai.complete(request)` through `dyn` | `ai.complete_boxed(request)` |
+| `#[async_trait] impl ChatCompletions` | Native implementation with `async fn complete` |
+
+`Client::chat`, request and response types, typestate construction, and typed
+tool contracts are unchanged.
+
 ## Migrating from 0.2
 
-Version 0.3 is additive. Existing `ChatRequest::new`, `ChatRequest::kimi_k3`,
-`with_tool`, `with_tools`, and `ToolCall::arguments_for` calls remain available.
-New code should prefer these replacements:
+Version 0.3 introduced these additive type-system APIs, and version 0.4 retains
+them. Existing `ChatRequest::new`, `ChatRequest::kimi_k3`, `with_tool`,
+`with_tools`, and `ToolCall::arguments_for` calls remain available. New code
+should prefer these replacements:
 
 | 0.2 API | Preferred 0.3 API | Benefit |
 | --- | --- | --- |
@@ -273,19 +349,6 @@ New code should prefer these replacements:
 
 No automatic migration is required. Adopt the new API when compile-time
 guarantees are useful at the call site.
-
-## Trait boundary
-
-Application services can depend on behavior instead of the concrete HTTP client:
-
-```rust,ignore
-async fn answer(
-    ai: &dyn edge_completions::ChatCompletions,
-    request: &edge_completions::ChatRequest,
-) -> Result<edge_completions::ChatCompletion, edge_completions::Error> {
-    ai.complete(request).await
-}
-```
 
 Keep the environment-based credential lookup while customizing the transport:
 
@@ -309,6 +372,8 @@ fn client() -> Result<Client, edge_completions::Error> {
 
 - Every library failure is typed with `thiserror`; production code contains no
   `unwrap`, `expect`, or panic path.
+- Configured request deadlines return `Error::Timeout`; caller cancellation
+  drops the future and therefore returns no SDK result.
 - Local request cardinality and tool-choice sequencing are enforced by typestate;
   provider responses and model-produced tool calls are checked at runtime.
 - `ValidatedToolCall<T>` is a proof-carrying value that binds decoded arguments
@@ -322,6 +387,8 @@ fn client() -> Result<Client, edge_completions::Error> {
   helper `arguments_for::<T>()` performs the same validation and returns the
   arguments.
 - Tool execution is intentionally outside this crate.
+- The HTTP adapter explicitly disables automatic retries. Applications own any
+  retry classification and bounded concurrency policy.
 
 A `402 Payment Required` with Cloudflare code `2021` means the account or AI
 Gateway lacks usable Workers AI balance/provider billing. Add the required
@@ -340,10 +407,11 @@ cargo audit
 cargo publish --locked --dry-run
 ```
 
-Tests cover exact request serialization, public trait use, typed tool-call
-round trips, HTTP authentication, response validation, provider errors,
-response limits, TLS policy, and secret redaction against local servers. Tests
-do not make live provider calls.
+Tests cover exact request serialization, native and dynamic trait use, future
+`Send` guarantees, caller cancellation, typed timeouts, concurrent calls,
+dropped connections, typed tool-call round trips, HTTP authentication, response
+validation, provider errors, response limits, TLS policy, and secret redaction
+against local servers. Tests do not make live provider calls.
 
 ## Scope and limitations
 
@@ -355,6 +423,7 @@ do not make live provider calls.
   versioned test before expanding the public API.
 
 See the [architecture](https://github.com/TAKAMAgents/edge-completions/blob/main/docs/ARCHITECTURE.md),
+[async execution guide](https://docs.rs/edge-completions/latest/edge_completions/async_model/),
 [type-system guide](https://docs.rs/edge-completions/latest/edge_completions/type_system/),
 [contributing guide](https://github.com/TAKAMAgents/edge-completions/blob/main/CONTRIBUTING.md),
 [CLI reference](https://github.com/TAKAMAgents/edge-completions/blob/main/docs/CLI.md),

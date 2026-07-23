@@ -2,6 +2,13 @@
 
 - Keep `edge-completions` a small provider SDK; do not add an autonomous tool-execution loop here.
 - Preserve the `ChatCompletions` trait as the application-facing substitution boundary.
+- Keep `ChatCompletions` native and free of boxed future allocation at the
+  generic trait boundary; keep runtime type erasure explicit in
+  `DynChatCompletions`.
+- Do not spawn SDK tasks or add hidden retries, queues, or concurrency policy.
+  Dropping a completion future must leave no SDK-owned work running.
+- Keep configured deadline expiry distinct from caller cancellation and other
+  transport failures.
 - Keep Cloudflare/OpenAI transport DTOs separate from application-specific domain models.
 - Treat tool calls and tool arguments as untrusted input and deserialize them into validated types.
 - Preserve the sealed request typestate, exhaustive `AssistantOutput`, and `ValidatedToolCall<T>` proof boundary.

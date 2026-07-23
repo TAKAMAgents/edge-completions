@@ -23,7 +23,14 @@ pull requests.
 
 ## Design constraints
 
-- Keep `ChatCompletions` as the application-facing trait boundary.
+- Keep native `ChatCompletions` as the generic application boundary. Its
+  returned future must remain `Send`.
+- Keep runtime type erasure in `DynChatCompletions`; do not reintroduce boxing
+  on every generic call.
+- Do not spawn SDK tasks or add an internal queue. The caller owns task
+  supervision, cancellation, fan-out, and bounded concurrency.
+- Preserve drop-based cancellation, typed timeout classification, and the
+  explicit no-retry transport policy.
 - Keep provider transport data private and expose only typed domain objects.
 - Treat model-produced tool names and arguments as untrusted input.
 - Preserve the request typestate and proof-carrying tool boundary. Add a
@@ -47,12 +54,19 @@ pull requests.
   bodies, and machine-specific paths.
 - Verify Rust examples with doctests and confirm CLI examples against the real
   command help and contract tests.
+- Document whether an async operation owns tasks, how cancellation works, which
+  deadline applies, and where backpressure is enforced.
 
 ## Pull requests
 
 Keep changes focused. Update public documentation and `CHANGELOG.md`, add tests
 for behavior changes, and explain compatibility impact. Maintainers may ask for
 a changeset to be split when it combines unrelated concerns.
+
+Changes to an async trait must include downstream compile coverage for both the
+native generic path and the explicit dynamic adapter. Cancellation and timeout
+changes require deterministic local failure tests; do not use production
+credentials.
 
 By contributing, you agree that your contribution is licensed under the
 project's MIT OR Apache-2.0 license.

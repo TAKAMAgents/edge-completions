@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::StatusCode;
 
 /// Errors returned while configuring or calling the provider endpoint.
@@ -12,6 +14,16 @@ pub enum Error {
     #[error("provider request failed before receiving a complete response: {source}")]
     Transport {
         /// The underlying HTTP client failure.
+        #[source]
+        source: reqwest::Error,
+    },
+
+    /// The configured request deadline elapsed.
+    #[error("provider request timed out after {duration:?}")]
+    Timeout {
+        /// Configured whole-request timeout.
+        duration: Duration,
+        /// The underlying HTTP client timeout.
         #[source]
         source: reqwest::Error,
     },

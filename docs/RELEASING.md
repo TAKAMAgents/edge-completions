@@ -11,6 +11,11 @@ reviewed commit and never pass a registry token on the command line.
 - Update `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, and user-facing guides.
 - Confirm that every public fallible API documents `# Errors` and that all
   compile-fail guarantees still fail for the intended reason.
+- For an async-boundary release, inspect `cargo public-api`: the native
+  `ChatCompletions` method must return `impl Future + Send`, and only
+  `DynChatCompletions` may expose `BoxChatFuture`.
+- Compile clean downstream fixtures for both generic native dispatch and
+  explicit dynamic dispatch.
 - Scan the exact package contents for credentials before publication.
 
 ## Bootstrap release
@@ -65,6 +70,7 @@ Record these postconditions:
 - docs.rs reports a successful build for the version;
 - the Git tag and GitHub release point to the release commit;
 - `cargo check` succeeds in a new temporary consumer project;
+- native and dynamic async downstream examples compile on the declared MSRV;
 - `cargo install edge-completions --version MAJOR.MINOR.PATCH --features cli`
   succeeds from crates.io.
 

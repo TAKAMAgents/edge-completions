@@ -124,6 +124,7 @@ data is statically proven.
 | Tool choice follows a tool | Compile time | `tool_choice` exists only for `WithTools` |
 | Tool output matches the validated contract | Compile time | `ValidatedToolCall<T>::result` requires `T::Output` |
 | Assistant alternatives are considered | Compile time | `AssistantOutput` is exhaustively matched |
+| A native completion future can move between executor threads | Compile time | `ChatCompletions` returns `impl Future + Send` |
 | Account ID, model ID, limits, and URLs are valid | Runtime at construction | Values may come from files, arguments, or environment variables |
 | HTTP exchange succeeds | Runtime | Network state is external to the program |
 | Provider response matches the contract | Runtime | Provider data is untrusted |
@@ -133,12 +134,19 @@ data is statically proven.
 Moving an external-data check into a type does not remove the runtime check. It
 records the successful check so later code cannot accidentally bypass it.
 
+`DynChatCompletions` deliberately erases the native future type into
+`BoxChatFuture`. Type erasure preserves the typed completion and error output,
+but it trades static dispatch for an explicit allocation. See the
+[async execution guide](ASYNC.md) for that boundary.
+
 ## Compatibility API
 
 The runtime-checked `ChatRequest::new`, `ChatRequest::kimi_k3`, `with_tool`,
 `with_tools`, and `ToolCall::arguments_for` APIs remain available for version
-0.2 callers. New integrations should prefer typestate construction and
-`ValidatedToolCall<T>` when the additional compiler guarantees are useful.
+0.2 callers. Version 0.4 changes only the async capability dispatch described in
+the [migration guide](ASYNC.md#migration-from-03). New integrations should
+prefer typestate construction and `ValidatedToolCall<T>` when the additional
+compiler guarantees are useful.
 
 ## Validation
 
@@ -156,5 +164,6 @@ cargo test --locked --all-targets --all-features
 
 The test suite verifies that the typestate and compatibility builders serialize
 the same request, independent configuration transitions commute, every
-assistant-output variant is classified, and validated tool results retain the
-matching tool contract.
+assistant-output variant is classified, validated tool results retain the
+matching tool contract, and native completion futures satisfy their `Send`
+contract.

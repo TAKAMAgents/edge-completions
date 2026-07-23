@@ -32,10 +32,13 @@ struct WeatherReport {
     temperature_celsius: i16,
 }
 
-async fn complete_through_trait(
-    completions: &dyn ChatCompletions,
+async fn complete_through_trait<C>(
+    completions: &C,
     request: &ChatRequest,
-) -> Result<edge_completions::ChatCompletion, edge_completions::Error> {
+) -> Result<edge_completions::ChatCompletion, edge_completions::Error>
+where
+    C: ChatCompletions,
+{
     completions.complete(request).await
 }
 

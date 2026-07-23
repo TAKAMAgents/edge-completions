@@ -9,10 +9,14 @@ model, runtime validation, and compatibility policy. Start with the
 ```text
 application -----------+
                        |
-optional typed CLI ----+-> ChatCompletions trait
-                              -> Client transport adapter
-                                  -> private Cloudflare/OpenAI wire contract
-                                      -> typed ChatCompletion and ToolCall
+optional typed CLI ----+-> native ChatCompletions port
+                              |
+                              +-> Client transport adapter
+                              |     -> private Cloudflare/OpenAI wire contract
+                              |         -> typed ChatCompletion and ToolCall
+                              |
+runtime type erasure --------> DynChatCompletions
+                                    -> BoxChatFuture
 ```
 
 ## Invariants
@@ -26,15 +30,60 @@ optional typed CLI ----+-> ChatCompletions trait
 - Provider bodies are bounded and never returned as raw public values.
 - The CLI accepts bounded prompt text and emits only validated assistant text.
 - The SDK proposes no policy and executes no tool side effects.
+- Native capability futures are `Send` and are not boxed.
+- Dynamic dispatch is explicit and allocates exactly at the erasure boundary.
+- Dropping a request future leaves no SDK-owned task running.
+- The HTTP adapter performs no automatic retry.
 
 The `ChatCompletions` trait is the application-facing substitution boundary. The
-concrete `Client` owns HTTP authentication, endpoint construction, deadlines,
-body limits, status mapping, and private wire deserialization.
+trait uses return-position `impl Future + Send`, so generic callers retain the
+concrete future type. `DynChatCompletions` is the separate object-safe adapter
+for callers that need `Arc<dyn ...>` or another runtime-selected
+implementation.
+
+The concrete `Client` owns HTTP authentication, endpoint construction,
+deadlines, body limits, status mapping, and private wire deserialization.
 
 The feature-gated CLI is an application adapter over that same trait boundary.
 It owns command parsing, standard-input bounds, exit status, and text-only
 terminal output; it does not add a second provider transport or untyped output
 path.
+
+## Async execution
+
+```text
+caller-owned Tokio task
+    |
+    +-- ChatCompletions::complete
+          |
+          +-- construct the HTTP request
+          +-- await headers
+          +-- await bounded body chunks
+          +-- decode the private provider DTO
+          +-- return a typed completion
+
+drop future
+    |
+    +-- drop the HTTP exchange and partial body
+    +-- no SDK task, queue, or tool action survives
+```
+
+The library does not create a runtime, spawn work, or hide a concurrency queue.
+Reqwest is Tokio-backed, and the caller owns the runtime and task hierarchy.
+The optional CLI creates a current-thread runtime only at the binary boundary.
+
+`RequestTimeout` configures one deadline covering connection establishment
+through response-body completion. Expiry maps to `Error::Timeout`. Caller
+cancellation is different: dropping the future abandons the result and returns
+no error.
+
+The client explicitly disables Reqwest's protocol retry policy. Application
+code owns retry classification, idempotency, and rate-limit handling. Callers
+also own fan-out and must bound concurrency when processing an unbounded input
+source.
+
+See the [async execution guide](ASYNC.md) for runnable native and dynamic
+dispatch examples.
 
 ## Compile-time request model
 
@@ -85,13 +134,18 @@ paired with another tool's output type.
 
 ## Error flow
 
-Configuration, transport, provider status, body limits, response decoding, and
-tool validation have separate typed error variants. Provider bodies and API
-tokens are never returned through public errors. The caller can match the
-owning failure boundary without parsing an error string.
+Configuration, timeout, transport, provider status, body limits, response
+decoding, and tool validation have separate typed error variants. Provider
+bodies and API tokens are never returned through public errors. The caller can
+match the owning failure boundary without parsing an error string.
 
 ## Compatibility
 
 Before 1.0, minor releases may refine the public type model. Deprecation is
 preferred when practical. Once 1.0 is reached, semantic-versioning compatibility
 is evaluated against the exported items in `src/lib.rs`.
+
+Version 0.4 intentionally changes `ChatCompletions` from an `async-trait`
+object-safe method to a native statically dispatched future. Callers that need
+type erasure migrate to `DynChatCompletions`. Request, response, tool, and
+concrete `Client::chat` contracts remain compatible with version 0.3.

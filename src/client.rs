@@ -1,4 +1,4 @@
-use std::{fmt, net::IpAddr, str::FromStr, time::Duration};
+use std::{fmt, future::Future, net::IpAddr, pin::Pin, str::FromStr, time::Duration};
 
 use reqwest::{Url, header};
 use serde::Deserialize;
@@ -22,9 +22,36 @@ pub const API_TOKEN_ENV: &str = "CLOUDFLARE_API_TOKEN";
 
 /// Provider-independent capability boundary for chat-completion adapters.
 ///
-/// Application code can accept `&dyn ChatCompletions` and substitute a test
-/// implementation without depending on HTTP or Cloudflare configuration.
-#[async_trait::async_trait]
+/// Generic application code can depend on this trait and substitute a test
+/// implementation without depending on HTTP or Cloudflare configuration. The
+/// returned future is statically dispatched, requires no boxed allocation for
+/// trait dispatch, and is safe to move between executor threads.
+///
+/// Use [`DynChatCompletions`] only when runtime type erasure is required.
+///
+/// ```
+/// use edge_completions::{
+///     ChatCompletion, ChatCompletions, ChatRequest, Error,
+/// };
+///
+/// struct Unavailable;
+///
+/// impl ChatCompletions for Unavailable {
+///     async fn complete<'a>(
+///         &'a self,
+///         _request: &'a ChatRequest,
+///     ) -> Result<ChatCompletion, Error> {
+///         Err(Error::MissingChoice)
+///     }
+/// }
+///
+/// fn require_send<T: Send>(_: T) {}
+///
+/// let request = ChatRequest::kimi_k3_builder()
+///     .message(edge_completions::ChatMessage::user("hello"))
+///     .build();
+/// require_send(Unavailable.complete(&request));
+/// ```
 pub trait ChatCompletions: Send + Sync {
     /// Executes one typed chat-completion request.
     ///
@@ -34,7 +61,83 @@ pub trait ChatCompletions: Send + Sync {
     /// status, response bounds, response decoding, or required response content
     /// prevents completion. Implementations must not expose credentials or raw
     /// provider bodies through the error.
-    async fn complete(&self, request: &ChatRequest) -> Result<ChatCompletion, Error>;
+    ///
+    /// # Cancellation
+    ///
+    /// Dropping the returned future cancels the operation. Implementations must
+    /// not detach background work that survives the future unless that behavior
+    /// is separately documented and supervised.
+    fn complete<'a>(
+        &'a self,
+        request: &'a ChatRequest,
+    ) -> impl Future<Output = Result<ChatCompletion, Error>> + Send + 'a;
+}
+
+/// Boxed future returned by [`DynChatCompletions`].
+///
+/// This type makes the allocation required for dynamic async dispatch explicit.
+///
+/// ```
+/// use edge_completions::BoxChatFuture;
+///
+/// fn require_send<T: Send>(_: &T) {}
+///
+/// let future: BoxChatFuture<'static> =
+///     Box::pin(async { Err(edge_completions::Error::MissingChoice) });
+/// require_send(&future);
+/// ```
+pub type BoxChatFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ChatCompletion, Error>> + Send + 'a>>;
+
+/// Object-safe adapter for runtime-selected chat-completion implementations.
+///
+/// Prefer [`ChatCompletions`] with generic dispatch. This boundary performs one
+/// future allocation per call in exchange for supporting values such as
+/// `Arc<dyn DynChatCompletions>`.
+///
+/// ```
+/// use edge_completions::{
+///     ChatCompletion, ChatCompletions, ChatMessage, ChatRequest,
+///     DynChatCompletions, Error,
+/// };
+///
+/// struct Unavailable;
+///
+/// impl ChatCompletions for Unavailable {
+///     async fn complete<'a>(
+///         &'a self,
+///         _request: &'a ChatRequest,
+///     ) -> Result<ChatCompletion, Error> {
+///         Err(Error::MissingChoice)
+///     }
+/// }
+///
+/// let service: &dyn DynChatCompletions = &Unavailable;
+/// let request = ChatRequest::kimi_k3_builder()
+///     .message(ChatMessage::user("hello"))
+///     .build();
+/// let _future = service.complete_boxed(&request);
+/// ```
+pub trait DynChatCompletions: Send + Sync {
+    /// Executes one typed request through an object-safe boxed future.
+    ///
+    /// Dropping the returned future cancels the in-flight operation. The SDK
+    /// does not leave a background task running.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed [`Error`] contract as
+    /// [`ChatCompletions::complete`].
+    fn complete_boxed<'a>(&'a self, request: &'a ChatRequest) -> BoxChatFuture<'a>;
+}
+
+impl<T> DynChatCompletions for T
+where
+    T: ChatCompletions,
+{
+    fn complete_boxed<'a>(&'a self, request: &'a ChatRequest) -> BoxChatFuture<'a> {
+        Box::pin(self.complete(request))
+    }
 }
 
 /// A validated Cloudflare account identifier.
@@ -367,6 +470,7 @@ pub struct Client {
     endpoint: Url,
     api_token: ApiToken,
     gateway_id: Option<GatewayId>,
+    timeout: RequestTimeout,
     response_size_limit: ResponseSizeLimit,
 }
 
@@ -432,12 +536,17 @@ impl Client {
 
     /// Executes one typed chat-completion request.
     ///
-    /// This method performs no automatic retry and never executes proposed
-    /// tools. The caller owns retry policy, authorization, and side effects.
+    /// This method performs no automatic retry, does not spawn a task, and
+    /// never executes proposed tools. The caller owns retry policy,
+    /// authorization, concurrency, and side effects.
+    ///
+    /// Dropping the returned future cancels the HTTP exchange and discards any
+    /// partial response. No SDK-owned task survives cancellation.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Transport`] for an incomplete HTTP exchange,
+    /// Returns [`Error::Timeout`] when the configured whole-request deadline
+    /// elapses, [`Error::Transport`] for another incomplete HTTP exchange,
     /// [`Error::ResponseTooLarge`] when the configured body limit is exceeded,
     /// [`Error::Provider`] for a non-success status, or
     /// [`Error::InvalidResponse`] when a successful body violates the supported
@@ -456,9 +565,9 @@ impl Client {
         let response = call
             .send()
             .await
-            .map_err(|source| Error::Transport { source })?;
+            .map_err(|source| map_request_error(source, self.timeout))?;
         let status = response.status();
-        let body = read_bounded_body(response, self.response_size_limit).await?;
+        let body = read_bounded_body(response, self.response_size_limit, self.timeout).await?;
 
         if !status.is_success() {
             return Err(Error::Provider {
@@ -492,9 +601,8 @@ impl Client {
     }
 }
 
-#[async_trait::async_trait]
 impl ChatCompletions for Client {
-    async fn complete(&self, request: &ChatRequest) -> Result<ChatCompletion, Error> {
+    async fn complete<'a>(&'a self, request: &'a ChatRequest) -> Result<ChatCompletion, Error> {
         self.chat(request).await
     }
 }
@@ -606,6 +714,7 @@ impl ClientBuilder {
         );
         let http = reqwest::Client::builder()
             .timeout(self.timeout.duration())
+            .retry(reqwest::retry::never())
             .default_headers(headers)
             .build()
             .map_err(|source| Error::Transport { source })?;
@@ -615,6 +724,7 @@ impl ClientBuilder {
             endpoint,
             api_token: self.api_token,
             gateway_id: self.gateway_id,
+            timeout: self.timeout,
             response_size_limit: self.response_size_limit,
         })
     }
@@ -623,6 +733,7 @@ impl ClientBuilder {
 async fn read_bounded_body(
     mut response: reqwest::Response,
     limit: ResponseSizeLimit,
+    timeout: RequestTimeout,
 ) -> Result<Vec<u8>, Error> {
     let limit_bytes = limit.bytes();
     if response
@@ -643,7 +754,7 @@ async fn read_bounded_body(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|source| Error::Transport { source })?
+        .map_err(|source| map_request_error(source, timeout))?
     {
         if body.len().saturating_add(chunk.len()) > limit_bytes {
             return Err(Error::ResponseTooLarge { limit_bytes });
@@ -651,6 +762,17 @@ async fn read_bounded_body(
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+fn map_request_error(source: reqwest::Error, timeout: RequestTimeout) -> Error {
+    if source.is_timeout() {
+        Error::Timeout {
+            duration: timeout.duration(),
+            source,
+        }
+    } else {
+        Error::Transport { source }
+    }
 }
 
 fn is_loopback(url: &Url) -> bool {

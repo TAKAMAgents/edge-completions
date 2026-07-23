@@ -21,12 +21,18 @@ or execute tools. Applications must authenticate users, authorize each tool
 action, validate typed arguments, apply timeouts and idempotency where relevant,
 and verify external side effects independently.
 
+The SDK spawns no background task. Dropping a completion future cancels the
+client exchange and discards partial response data. This does not prove that a
+remote provider stopped processing a request, so applications must not treat
+client cancellation as provider-side rollback.
+
 Compile-time guarantees cover local program structure:
 
 - `ChatRequestBuilder` prevents empty requests and invalid tool-choice ordering.
 - `AssistantOutput` requires callers to consider every supported output shape.
 - `ValidatedToolCall<T>` prevents pairing a validated call with another tool's
   output type.
+- `ChatCompletions` requires a `Send` future for the native async path.
 
 These guarantees do not make provider data trustworthy. HTTP responses, tool
 names, tool arguments, authorization decisions, and side effects still require
@@ -39,9 +45,15 @@ Applications should use a least-privilege Cloudflare token and must not log
 requests, prompts, account identifiers, or tool arguments without an explicit
 data-handling policy.
 
+The Reqwest adapter disables automatic retries. `Error::Timeout` identifies a
+configured whole-request deadline, while caller cancellation returns no SDK
+result. Applications that add retries must classify provider status, rate
+limits, idempotency, and possible remote completion before resubmitting work.
+
 ## Verification for security-sensitive changes
 
-Run the local contract tests, dependency policy, advisory scan, and secret scan
-before release. Tests must not use production credentials or captured provider
-payloads. A successful local test does not prove that a live Cloudflare account
-is authorized, funded, or configured correctly.
+Run the local contract tests, async cancellation and dropped-connection tests,
+dependency policy, advisory scan, and secret scan before release. Tests must not
+use production credentials or captured provider payloads. A successful local
+test does not prove that a live Cloudflare account is authorized, funded, or
+configured correctly.
