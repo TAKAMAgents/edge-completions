@@ -55,23 +55,6 @@ fn client_for(server: &MockServer) -> Result<Client, Error> {
         .build()
 }
 
-async fn wait_for_request_count(server: &MockServer, expected: usize) -> Result<(), io::Error> {
-    for _ in 0..100 {
-        let received = server
-            .received_requests()
-            .await
-            .map_or(0, |requests| requests.len());
-        if received >= expected {
-            return Ok(());
-        }
-        tokio::task::yield_now().await;
-    }
-
-    Err(io::Error::other(
-        "mock server did not receive the expected request",
-    ))
-}
-
 #[tokio::test]
 async fn native_future_is_send_and_dynamic_erasure_is_explicit() -> TestResult {
     let completions = UnavailableCompletions;
@@ -115,29 +98,37 @@ async fn cloned_client_supports_concurrent_native_calls() -> TestResult {
 
 #[tokio::test]
 async fn configured_deadline_returns_typed_timeout() -> TestResult {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(Duration::from_secs(30))
-                .set_body_json(successful_completion("chatcmpl-too-late")),
-        )
-        .mount(&server)
-        .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let (request_received, request_observed) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        let mut request_buffer = [0_u8; 2_048];
+        let _bytes_read = socket.read(&mut request_buffer).await?;
+        let _receiver_still_waiting = request_received.send(());
+        while socket.read(&mut request_buffer).await? != 0 {}
+        Ok::<(), io::Error>(())
+    });
     let client = Client::builder(AccountId::new("account-1")?, ApiToken::new("test-token")?)
-        .base_url(ApiBaseUrl::new(format!("{}/", server.uri()))?)
+        .base_url(ApiBaseUrl::new(format!("http://{address}/"))?)
         .timeout(RequestTimeout::new(Duration::from_secs(1))?)
         .build()?;
     let request = request("timeout");
 
-    tokio::time::pause();
     let task = tokio::spawn(async move { client.complete(&request).await });
-    wait_for_request_count(&server, 1).await?;
+    tokio::time::timeout(Duration::from_secs(5), request_observed)
+        .await
+        .map_err(|_| io::Error::other("loopback server did not receive the request"))??;
+    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(2)).await;
     let error = match task.await? {
         Err(error) => error,
         Ok(_) => return Err("request unexpectedly completed before its deadline".into()),
     };
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .map_err(|_| io::Error::other("timed-out request did not close its connection"))???;
 
     match error {
         Error::Timeout { duration, source } => {
