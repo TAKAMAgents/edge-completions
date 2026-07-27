@@ -47,7 +47,7 @@ url = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
-wiremock = "=0.6.4"
+wiremock = "=0.6.5"
 
 [[bin]]
 name = "edge-completions"
